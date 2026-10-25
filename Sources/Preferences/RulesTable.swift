@@ -665,7 +665,7 @@ extension RulesTable {
 /// Per-column writes on an otherwise immutable `Rule`: every field lives in its
 /// own slot of the original rule dictionary, so editing one never touches the
 /// values held for the other action types.
-private extension Rule {
+extension Rule {
     func renamed(to newName: String) -> Rule {
         copying(name: newName)
     }

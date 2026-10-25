@@ -542,7 +542,7 @@ public final class RuleEngine {
     /// case-insensitively against the whole bundle ID; regex filters are
     /// case-sensitive substring matches. An empty filter therefore matches
     /// nothing — the original does not treat it as "all apps".
-    private func matchesFilter(filter: String, type: String, bundleID: String) -> Bool {
+    func matchesFilter(filter: String, type: String, bundleID: String) -> Bool {
         if type == "regex" {
             guard let regex = try? NSRegularExpression(pattern: filter) else { return false }
             let range = NSRange(location: 0, length: bundleID.utf16.count)

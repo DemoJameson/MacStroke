@@ -136,6 +136,21 @@ public final class RuleStore: ObservableObject {
 
     /// Whether any enabled rule's filter matches the given bundle ID
     /// (original: `appSuitedRule:` — gates whether the gesture UI is shown).
+    /// Match an impulse gesture exactly against enabled, filter-matching rules.
+    ///
+    /// 滚轮刻度是高频路径，这里直接遍历本 store 的规则，复用 RuleEngine 的
+    /// filter 语义，不再每次调用都全量复制规则建引擎。
+    public func match(impulse: ImpulseGesture, bundleID: String) -> Rule? {
+        guard BlackWhiteFilter.shared.shouldHookMouseEventForApp(bundleID) else { return nil }
+        return rules.first {
+            $0.isEnabled && $0.impulse == impulse
+                && engineStub.matchesFilter(filter: $0.filter, type: $0.filterType, bundleID: bundleID)
+        }
+    }
+
+    /// matchesFilter 无状态，共享一个空引擎只为复用它的过滤实现。
+    private let engineStub = RuleEngine()
+
     public func appSuitedRule(bundleID: String) -> Bool {
         let engine = RuleEngine()
         engine.add(contentsOf: rules)
