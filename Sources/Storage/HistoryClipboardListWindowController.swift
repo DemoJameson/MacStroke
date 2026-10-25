@@ -171,7 +171,7 @@ public final class HistoryClipboardListWindowController: NSWindowController, NSW
         clip.addSubview(tips)
 
         // Result list: single column, no header, source-list rounded selection.
-        let tableView = NSTableView()
+        let tableView = EscForwardingTableView()
         tableView.delegate = self
         tableView.dataSource = self
         tableView.headerView = nil
@@ -620,6 +620,24 @@ public final class HistoryClipboardListWindowController: NSWindowController, NSW
         private func refreshReveal() {
             revealButton?.isHidden = !(hovered || isSelected || isEmphasized)
         }
+    }
+}
+
+/// Result list that hands Esc back to the panel.
+///
+/// `NSTableView` swallows Escape in `keyDown:` instead of letting it reach
+/// `cancelOperation:` — verified against a real window: neither the table's own
+/// `cancelOperation:` nor anything up the responder chain fired, so with the
+/// list focused the panel stayed open while the search field closed it. Forward
+/// the command explicitly so both focus positions behave the same.
+private final class EscForwardingTableView: NSTableView {
+    override func keyDown(with event: NSEvent) {
+        let isEscape = event.keyCode == 53 || event.charactersIgnoringModifiers == "\u{1b}"
+        if isEscape, nextResponder?.tryToPerform(#selector(NSResponder.cancelOperation(_:)),
+                                                 with: self) == true {
+            return
+        }
+        super.keyDown(with: event)
     }
 }
 
