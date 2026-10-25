@@ -103,8 +103,91 @@ final class GestureThumbView: NSView {
     }
 }
 
+/// 规则页三个文本框的样式对齐录制框（ShortcutRecorderView）：controlBackground
+/// 圆角填充 + separator 1px 描边自绘外框；AppKit 的 text cell 一律从顶部排版
+/// （实测 20pt 框里文字中心 16 而不是 20，与 usesSingleLineMode / wraps 无关），
+/// 所以文字/编辑区域按 (框高 − 行高) / 2 下移才是真居中。
+final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
+    /// 文字距左右边框的内边距（录制框同款观感）。
+    private static let horizontalPadding: CGFloat = 8
+
+    /// 文字区：左右内边距 + 垂直居中。AppKit 的 text cell 静态排版从顶部开始
+    /// （实测 25pt 框里墨迹中心 16 而非 25/2），编辑态 field editor 又有自己的
+    /// 2pt 容器内边距 —— 静态自绘 + editor rect 统一走这一个矩形，两种状态
+    /// 的文字墨迹才落在同一位置（实测均 9~10pt / 垂直 12.5pt）。
+    private func textRect(_ rect: NSRect) -> NSRect {
+        var r = rect
+        r.origin.y += (rect.height - cellSize.height) / 2
+        r.size.height = cellSize.height
+        r.origin.x += Self.horizontalPadding
+        r.size.width -= Self.horizontalPadding * 2
+        return r
+    }
+
+    /// 编辑态专用：field editor 有内建的容器内边距，会让文字比静态态偏右约
+    /// 1pt。这里把 editor 的矩形反向补偿，两种状态文字墨迹对齐（实测差 ≤0.5pt）。
+    private func editorRect(_ rect: NSRect) -> NSRect {
+        var r = textRect(rect)
+        r.origin.x -= 0.5
+        r.size.width += 1
+        return r
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+        let box = NSBezierPath(roundedRect: cellFrame.insetBy(dx: 0.5, dy: 0.5),
+                               xRadius: 4, yRadius: 4)
+        NSColor.controlBackgroundColor.setFill()
+        box.fill()
+        NSColor.separatorColor.setStroke()
+        box.lineWidth = 1
+        box.stroke()
+        // 文字自己画：super.drawInterior 的静态排版另有内部 inset，会和编辑态错位。
+        let tr = textRect(cellFrame)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let text = NSAttributedString(string: stringValue, attributes: attributes)
+        let size = text.size()
+        text.draw(in: NSRect(x: tr.minX, y: tr.midY - size.height / 2,
+                             width: tr.width, height: size.height))
+    }
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        // 文字已在 draw(withFrame:) 自绘；清空避免 super 再画一遍导致双影。
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect { textRect(rect) }
+    override func drawingRect(forBounds rect: NSRect) -> NSRect { textRect(rect) }
+
+    override func select(withFrame rect: NSRect, in controlView: NSView,
+                         editor textObj: NSText, delegate: Any?,
+                         start selStart: Int, length selLength: Int) {
+        super.select(withFrame: editorRect(rect), in: controlView, editor: textObj,
+                     delegate: delegate, start: selStart, length: selLength)
+    }
+
+    override func edit(withFrame rect: NSRect, in controlView: NSView,
+                       editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: editorRect(rect), in: controlView, editor: textObj,
+                   delegate: delegate, event: event)
+    }
+}
+
 /// The original rules table: six columns, 84pt rows, one live control per cell.
 struct RulesTable: NSViewRepresentable {
+    /// Ends the window's shared field editor so an open text cell commits and
+    /// the coordinator's `isEditing` clears before anything replaces the model.
+    /// Callers that swap rules behind a still-open editor (the "Pick a running
+    /// app" modal) must run this first, or reloadIfNeeded() silently keeps the
+    /// stale cell text.
+    static func commitActiveFieldEditor() {
+        guard let window = NSApp.keyWindow,
+              let editor = window.firstResponder as? NSText,
+              editor.isFieldEditor else { return }
+        window.endEditing(for: editor)
+    }
+
     @ObservedObject var store: RuleStore
     @Binding var selectedRow: Int
     /// Runs the "Draw Gesture!" modal for the rule at a row index.
@@ -274,7 +357,8 @@ extension RulesTable {
             case "Gesture_Image":
                 addGestureCell(to: container, rule: rule, row: row)
             case "Gesture", "Filter", "Note":
-                addTextCell(to: container, identifier: identifier, rule: rule, row: row)
+                addTextCell(to: container, identifier: identifier, rule: rule, row: row,
+                            columnWidth: tableColumn?.width ?? 100)
             case "Type":
                 addTypeCell(to: container, rule: rule, row: row)
             case "Action":
@@ -338,20 +422,20 @@ extension RulesTable {
             container.addSubview(thumb)
         }
 
-        private func addTextCell(to container: NSView, identifier: String, rule: Rule, row: Int) {
-            let width: CGFloat
+        private func addTextCell(to container: NSView, identifier: String,
+                                 rule: Rule, row: Int, columnWidth: CGFloat) {
             let value: String
             switch identifier {
             case "Gesture":
-                width = 100
                 value = rule.name
             case "Filter":
-                width = 160
                 value = rule.filter
             default:
-                width = 400
                 value = rule.note
             }
+            // 宽度跟随列宽（此前写死 100/160/400，列宽 98/138/221 → 右边溢出被
+            // 下一列裁出一条黑块）。文字的左右留白由 cell 内部负责。
+            let width = max(40, columnWidth)
             let field = makeField(identifier: identifier, value: value, row: row, width: width)
             container.addSubview(field)
         }
@@ -406,13 +490,13 @@ extension RulesTable {
                 container.addSubview(combo)
             case 2:
                 container.addSubview(makeField(identifier: "Text", value: textValue(of: rule),
-                                               row: row, width: 100))
+                                               row: row, width: 88))
             case 4:
                 // 截图动作没有参数可填，格子里只写清它会做什么。
                 container.addSubview(Self.makeStaticActionLabel(L("Screenshot")))
             default:
                 container.addSubview(makeField(identifier: "Password", value: passwordValue(of: rule),
-                                               row: row, width: 100))
+                                               row: row, width: 88))
             }
         }
 
@@ -425,18 +509,28 @@ extension RulesTable {
             return field
         }
 
-        private func makeField(identifier: String, value: String, row: Int, width: CGFloat) -> NSTextField {
-            let frame = NSRect(x: 0, y: 30, width: width, height: 20)
+        /// internal 供测试断言单行居中设置；调用方只有 addTextCell。
+        func makeField(identifier: String, value: String, row: Int, width: CGFloat) -> NSTextField {
+            let frame = NSRect(x: 0, y: 30, width: width, height: 25)
             let field: NSTextField = identifier == "Password"
                 ? NSSecureTextField(frame: frame)
                 : NSTextField(frame: frame)
+            let centeredCell = VerticallyCenteredTextFieldCell(textCell: value)
+            centeredCell.isEditable = true
+            centeredCell.isBordered = false
+            centeredCell.isBezeled = false
+            centeredCell.drawsBackground = false
+            centeredCell.lineBreakMode = .byTruncatingTail
+            centeredCell.usesSingleLineMode = true
+            centeredCell.wraps = false
+            centeredCell.isScrollable = true
+            field.cell = centeredCell
             field.isEditable = true
             field.isBordered = false
             field.isBezeled = false
-            field.drawsBackground = true
-            field.bezelStyle = .squareBezel
-            field.lineBreakMode = .byTruncatingTail
-            field.cell?.wraps = true
+            field.drawsBackground = false
+            field.usesSingleLineMode = true
+            field.cell?.wraps = false
             field.cell?.isScrollable = true
             field.identifier = NSUserInterfaceItemIdentifier(identifier)
             field.tag = row
