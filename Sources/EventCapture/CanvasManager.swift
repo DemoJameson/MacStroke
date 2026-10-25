@@ -371,6 +371,7 @@ public class CanvasManager: EventCaptureDelegate {
         }
 
         shouldShow = true
+        capturedBundleID = frontBundle
 
         // If a previous gesture was interrupted (down without up, e.g. the tap
         // was disabled by timeout), finish it off so the app sees its click.
@@ -395,7 +396,7 @@ public class CanvasManager: EventCaptureDelegate {
         currentPoints.append(event.point)
         addPointToCanvas(event.point)
 
-        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        let frontBundle = capturedBundleID ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
         let consumed: Bool
 
         // Rule-recording mode ("Draw Gesture" from preferences).
