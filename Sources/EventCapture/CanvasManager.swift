@@ -108,7 +108,17 @@ public class CanvasManager: EventCaptureDelegate {
     /// When true, the next completed gesture is recorded via
     /// `onGestureRecorded` instead of being matched against rules
     /// (the "Draw Gesture" rule-editing flow).
-    public var isRecordingGesture = false
+    public var isRecordingGesture = false {
+        didSet {
+            // CanvasView reads this through UserDefaults: the overlay lives in
+            // EventCapture, and prefs writes go through the same channel the
+            // view already uses for its other knobs.
+            UserDefaults.standard.set(self.isRecordingGesture, forKey: "macStrokeRecordingGesture")
+            for window in canvasWindows.values {
+                window.canvasView.needsDisplay = true
+            }
+        }
+    }
 
     /// Called with the recorded gesture points when `isRecordingGesture`
     /// completes. The receiver stores them into the pending rule.

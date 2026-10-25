@@ -74,12 +74,16 @@ final class CanvasView: NSView {
     }
 
     /// Draws the gesture path as connected line segments.
-    /// If the user has disabled mouse paths in preferences, nothing is drawn.
+    ///
+    /// 录制手势（画新触发器）时无视「关闭鼠标路径」设置：那一屏就是给用户看
+    /// 笔画走向的，不画等于盲画。正常手势才尊重偏好开关。
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        // Do not draw the mouse path if disabled in preferences.
-        if UserDefaults.standard.bool(forKey: "disableMousePath") {
+        // Do not draw the mouse path if disabled in preferences — unless a
+        // gesture is being recorded right now.
+        if UserDefaults.standard.bool(forKey: "disableMousePath"),
+           !UserDefaults.standard.bool(forKey: "macStrokeRecordingGesture") {
             return
         }
 
