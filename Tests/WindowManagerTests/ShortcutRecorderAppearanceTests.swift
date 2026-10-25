@@ -68,7 +68,13 @@ final class ShortcutRecorderAppearanceTests: XCTestCase {
         host.cacheDisplay(in: host.bounds, to: rep)
         // x=60 sits inside the recorder box (it starts at x=30) and clear of the
         // centred shortcut text.
-        let color = try XCTUnwrap(rep.colorAt(x: 60, y: 30))
+        // colorAt takes *pixel* coordinates and the bitmap is Retina-scaled, so
+        // sample the bitmap centre: the recorder box is centred in the host and
+        // spans x≈33–234pt / y≈18–44pt, so the midpoint (65, 30)pt always lands
+        // on its background, clear of the centred shortcut text. Sampling a
+        // fixed (60, 30) once read the transparent area above the box (alpha 0),
+        // which made the light assertions fail and the dark ones pass vacuously.
+        let color = try XCTUnwrap(rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2))
         return try XCTUnwrap(color.usingColorSpace(.deviceRGB))
     }
 
@@ -91,7 +97,9 @@ final class ShortcutRecorderAppearanceTests: XCTestCase {
 
         let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: rep)
-        let color = try XCTUnwrap(rep.colorAt(x: 6, y: rep.pixelsHigh / 2))
+        // Same pixel-coordinate rule as the hosted case: sample the bitmap
+        // midpoint so the point stays inside the recorder's filled background.
+        let color = try XCTUnwrap(rep.colorAt(x: 8, y: rep.pixelsHigh / 2))
         return try XCTUnwrap(color.usingColorSpace(.deviceRGB))
     }
 }
