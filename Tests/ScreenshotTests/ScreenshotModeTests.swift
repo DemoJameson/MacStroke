@@ -993,11 +993,10 @@ final class ScreenshotModeTests: XCTestCase {
         view.showModeBar()
         if mode != .still { view.modeBar?.onPick?(mode) }
         let bar = try XCTUnwrap(view.modeBar)
-        view.needsDisplay = true
-        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        // 1 点 = 1 像素：格子的坐标和亮度阈值都按这个比例标定（见 OffscreenSampling.swift）。
+        guard let bitmap = view.renderOneToOne() else {
             throw BarFailure.noBitmap
         }
-        view.cacheDisplay(in: view.bounds, to: bitmap)
         try export(bitmap, name: name)
 
         var cells: [ScreenshotMode: NSRect] = [:]
@@ -1040,8 +1039,9 @@ final class ScreenshotModeTests: XCTestCase {
         NSLog("%@", "[ScreenshotTests] 渲染结果：\(url.path)")
     }
 
+    /// 传入的是视图点坐标；Retina 位图是 2x，按点换算再取色。
     private func color(in bitmap: NSBitmapImageRep, x: Int, y: Int) -> NSColor? {
-        bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+        bitmap.srgbColor(atPoint: CGPoint(x: x, y: y))
     }
 
     private func luminance(_ color: NSColor) -> CGFloat {

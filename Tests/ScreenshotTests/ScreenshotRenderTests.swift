@@ -369,8 +369,8 @@ final class ScreenshotRenderTests: XCTestCase {
                 var hit = 0
                 for y in Int(rect.minY + 1)..<Int(rect.maxY - 1) {
                     for x in Int(rect.minX + 1)..<Int(rect.maxX - 1) {
-                        guard let a = bitmap.colorAt(x: x, y: y),
-                              let b = without.colorAt(x: x, y: y) else { continue }
+                        guard let a = bitmap.srgbColor(atPoint: CGPoint(x: x, y: y)),
+                              let b = without.srgbColor(atPoint: CGPoint(x: x, y: y)) else { continue }
                         if abs(a.redComponent - b.redComponent) > 0.02
                             || abs(a.greenComponent - b.greenComponent) > 0.02
                             || abs(a.blueComponent - b.blueComponent) > 0.02 { hit += 1 }
@@ -414,6 +414,15 @@ final class ScreenshotRenderTests: XCTestCase {
         let bitmap = try render(scene.view, name: "bar-mosaic.png")
         let bar = try XCTUnwrap(scene.view.toolbar)
 
+        // 判据锚在**条子自己的底色**上，不写死绝对亮度：1.5pt 的笔画落在半个像素上时
+        // 会被劈成两行各约 0.58 的灰（实测矩形底边就是这样），绝对阈值 0.6 会把那条
+        // 线整根判成「暗」，笔画图标于是凭空长出一片「自成一块的暗格」，反向对照假失败。
+        // 底衬取条子最右端的留白（那儿只有底、没有图标）。
+        let background = luminance(try XCTUnwrap(color(in: bitmap,
+                                                       x: Int(bar.frame.maxX) - 3,
+                                                       y: Int(bar.frame.midY))))
+        let solidLevel = background + 0.30
+        let dimLevel = background + 0.08
         let lum: (Int, Int) -> CGFloat = { [self] x, y in
             guard let c = color(in: bitmap, x: x, y: y) else { return 0 }
             return sum(c) / 3
@@ -424,12 +433,12 @@ final class ScreenshotRenderTests: XCTestCase {
             for x in Int(cell.minX)...Int(cell.maxX - 1) {
                 for y in Int(cell.minY)...Int(cell.maxY - 1) {
                     let l = lum(x, y)
-                    if l > 0.6 { solid += 1; continue }
-                    guard l > 0.28 else { continue }
+                    if l > solidLevel { solid += 1; continue }
+                    guard l > dimLevel else { continue }
                     dim += 1
                     var nearSolid = false
                     for dx in -2...2 where !nearSolid {
-                        for dy in -2...2 where lum(x + dx, y + dy) > 0.6 { nearSolid = true; break }
+                        for dy in -2...2 where lum(x + dx, y + dy) > solidLevel { nearSolid = true; break }
                     }
                     if !nearSolid { loneDim += 1 }
                 }
@@ -440,8 +449,11 @@ final class ScreenshotRenderTests: XCTestCase {
         let mosaic = tones(of: 6)
         XCTAssertGreaterThanOrEqual(mosaic.loneDim, 12,
                                     "半透明那一档要自成一块，不能只是笔画边的毛刺：\(mosaic)")
-        XCTAssertGreaterThanOrEqual(mosaic.dim, 150, "暗格要有面积：\(mosaic)")
-        XCTAssertGreaterThanOrEqual(mosaic.solid, 100, "实心格也要有面积，只剩一档就成了实心方块：\(mosaic)")
+        // 面积下限按几何算：18pt 见方的棋盘格切成 4x4，暗格 8 块、每块 (4.5-0.6)² ≈ 15.2px²，
+        // 扣掉抗锯齿毛边后实测 144；实心格同量级。阈值取几何量的一半，既能挡住「只剩一档
+        // 实心方块」，又不会被半像素缝吃掉几个像素就翻脸。
+        XCTAssertGreaterThanOrEqual(mosaic.dim, 75, "暗格要有面积：\(mosaic)")
+        XCTAssertGreaterThanOrEqual(mosaic.solid, 60, "实心格也要有面积，只剩一档就成了实心方块：\(mosaic)")
         // 反向对照：旁边三格是笔画图标，同一条判据必须是 0 —— 否则上面三条谁都能满足。
         for index in [0, 1, 2] {
             XCTAssertEqual(tones(of: index).loneDim, 0, "第 \(index) 格是笔画图标，不该有一片同档灰")
@@ -521,9 +533,6 @@ final class ScreenshotRenderTests: XCTestCase {
         XCTAssertGreaterThan(overlap.height, 8, "前提：竖向没重叠")
 
         let shown = try render(view, name: "tip-over-panel-shown.png")
-        if shown.pixelsWide != Int(size.width) {
-            throw XCTSkip("离屏渲染比例 \(shown.pixelsWide)/\(Int(size.width)) ≠ 帧比例")
-        }
         // 反向对照的量尺：面板上气泡**没**盖到的那一段，取同一行高。
         // 往气泡右边取，不能往左边取 —— 气泡横向只钳屏、不钳条子，比面板更靠左是常态
         // （实测 tip x 377…491、panel x 411…647），往左那段压根不在面板上，比出来恒为 0。
@@ -766,12 +775,11 @@ final class ScreenshotRenderTests: XCTestCase {
 
     @discardableResult
     private func render(_ view: NSView, name: String) throws -> NSBitmapImageRep {
-        view.needsDisplay = true
-        view.layoutSubtreeIfNeeded()
-        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        // 1 点 = 1 像素：下面的坐标和阈值都是按这个比例写死并实测标定的，
+        // 交给系统按 backing scale 出位图会在 Retina 上整体翻倍（见 OffscreenSampling.swift）。
+        guard let bitmap = view.renderOneToOne() else {
             throw RenderFailure.noBitmap
         }
-        view.cacheDisplay(in: view.bounds, to: bitmap)
         try export(bitmap, name: name)
         return bitmap
     }
@@ -786,9 +794,11 @@ final class ScreenshotRenderTests: XCTestCase {
         NSLog("%@", "[ScreenshotTests] 渲染结果：\(url.path)")
     }
 
-    /// bitmap 的像素坐标是左上原点，和视图（flipped）一致，所以能直接用视图坐标取点。
+    /// 取色一律按**视图点坐标**：位图和视图同为左上原点、同向，但 `colorAt(x:y:)`
+    /// 吃的是像素坐标，Retina 上位图是 2x，直接喂点坐标会整体错位一倍
+    /// （见 OffscreenSampling.swift）。
     private func color(in bitmap: NSBitmapImageRep, x: Int, y: Int) -> NSColor? {
-        bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+        bitmap.srgbColor(atPoint: CGPoint(x: x, y: y))
     }
 
     private func sum(_ color: NSColor) -> CGFloat {
@@ -805,8 +815,8 @@ final class ScreenshotRenderTests: XCTestCase {
     /// 乘 0.45，换到 sRGB 之后被 gamma 一弯，比值就不再是 0.45（实测 0.51）。参照图和
     /// 遮罩图都出自同一块屏的 cacheDisplay，空间一致，raw 值才可比。
     private func brightness(in bitmap: NSBitmapImageRep, scene: Scene, x: Int, y: Int) throws -> CGFloat {
-        let rendered = try XCTUnwrap(bitmap.colorAt(x: x, y: y))
-        let bare = try XCTUnwrap(scene.bare.colorAt(x: x, y: y))
+        let rendered = try XCTUnwrap(bitmap.color(atPoint: CGPoint(x: x, y: y)))
+        let bare = try XCTUnwrap(scene.bare.color(atPoint: CGPoint(x: x, y: y)))
         XCTAssertGreaterThan(sum(bare), 0.3, "测试图案在这个位置太黑，比值没有意义")
         return sum(rendered) / sum(bare)
     }

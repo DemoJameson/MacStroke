@@ -335,16 +335,15 @@ final class ScreenshotToolPanelTests: XCTestCase {
             (border: Int, background: Int, backdrop: Int) {
             let image = try XCTUnwrap(ScreenshotComposer.compose(shot: shot, selection: selection,
                                                                  annotations: annotations))
+            // 成品按 backing scale 出图，取色一律用视图点坐标换算（见 OffscreenSampling.swift）。
             let bitmap = try XCTUnwrap(NSBitmapImageRep(cgImage: image))
-            if bitmap.pixelsWide != Int(selection.width) {
-                throw XCTSkip("离屏渲染比例 \(bitmap.pixelsWide)/\(Int(selection.width)) ≠ 帧比例")
-            }
             try dump(bitmap, name: name)
             var border = 0, background = 0, backdrop = 0
             for y in stride(from: 0, to: Int(box.height), by: 1) {
                 for x in stride(from: 0, to: Int(box.width), by: 1) {
-                    guard let color = bitmap.colorAt(x: Int(box.minX) + x, y: Int(box.minY) + y)?
-                            .usingColorSpace(.sRGB) else { continue }
+                    guard let color = bitmap.srgbColor(atPoint: CGPoint(x: box.minX + CGFloat(x),
+                                                                       y: box.minY + CGFloat(y)))
+                    else { continue }
                     if color.greenComponent > 0.6, color.redComponent < 0.4, color.blueComponent < 0.4 {
                         backdrop += 1
                     } else if color.blueComponent < 0.4, color.redComponent > 0.6,

@@ -333,12 +333,10 @@ final class ScreenshotMagnifierTests: XCTestCase {
     }
 
     private func render(_ view: NSView, name: String) throws -> NSBitmapImageRep {
-        view.needsDisplay = true
-        view.layoutSubtreeIfNeeded()
-        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        // 1 点 = 1 像素：格线、像素块这些判据按点写死（见 OffscreenSampling.swift）。
+        guard let bitmap = view.renderOneToOne() else {
             throw RenderFailure.noBitmap
         }
-        view.cacheDisplay(in: view.bounds, to: bitmap)
         if let data = bitmap.representation(using: .png, properties: [:]) {
             let directory = URL(fileURLWithPath: "/tmp/macstroke-magnifier-check", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -349,9 +347,11 @@ final class ScreenshotMagnifierTests: XCTestCase {
         return bitmap
     }
 
-    /// bitmap 的像素坐标是左上原点，和面板（flipped）一致，所以直接用面板坐标取点。
+    /// 位图坐标是左上原点、和面板（flipped）同向；但 `colorAt(x:y:)` 吃的是**像素**
+    /// 坐标，而这里的 x/y 全是面板点坐标 —— Retina 上位图是 2x，必须按点换算
+    /// （见 OffscreenSampling.swift）。
     private func color(in bitmap: NSBitmapImageRep, x: Int, y: Int) throws -> NSColor {
-        try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+        try XCTUnwrap(bitmap.srgbColor(atPoint: CGPoint(x: x, y: y)))
     }
 
     /// 取成 0-255 的三个整数：格子里那几列必须逐位相同，比颜色对象相等可靠。

@@ -75,12 +75,13 @@ final class ScreenshotPinTests: XCTestCase {
         let view = ScreenshotPinView(image: pattern, naturalSize: NSSize(width: 400, height: 200))
         let window = ScreenshotOverlayWindow(screenFrame: NSRect(x: 0, y: 0, width: 400, height: 200))
         window.contentView = view
-        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        // 1 点 = 1 像素：下面按点坐标写死（见 OffscreenSampling.swift）。
+        guard let bitmap = view.renderOneToOne() else {
             return XCTFail("拿不到离屏位图")
         }
-        view.cacheDisplay(in: view.bounds, to: bitmap)
 
-        let color = { (x: Int, y: Int) in bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) ?? .clear }
+        // 视图点坐标 → 位图像素：Retina 上位图是 2x（见 OffscreenSampling.swift）。
+        let color = { (x: Int, y: Int) in bitmap.srgbColor(atPoint: CGPoint(x: x, y: y)) ?? .clear }
         XCTAssertTrue(QuadrantPattern.isRed(color(10, 10)), "左上是红，画倒了就成了蓝")
         XCTAssertTrue(QuadrantPattern.isGreen(color(390, 10)))
         XCTAssertTrue(QuadrantPattern.isBlue(color(10, 190)))

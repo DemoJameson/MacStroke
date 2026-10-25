@@ -1200,12 +1200,8 @@ final class ScreenshotAnnotationEditTests: XCTestCase {
     // MARK: 渲染取证
 
     private func render(_ view: ScreenshotSelectionView) throws -> NSBitmapImageRep {
-        view.needsDisplay = true
-        view.layoutSubtreeIfNeeded()
-        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds),
-                                   "拿不到离屏位图")
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        return bitmap
+        // 1 点 = 1 像素：这个文件里的取点与阈值都按点标定（见 OffscreenSampling.swift）。
+        try XCTUnwrap(view.renderOneToOne(), "拿不到离屏位图")
     }
 
     private func rawBytes(_ bitmap: NSBitmapImageRep) -> [UInt8] {

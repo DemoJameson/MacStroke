@@ -26,14 +26,10 @@ final class ScreenshotAnnotationTests: XCTestCase {
         let shot = try frame800x500()
         let image = try XCTUnwrap(ScreenshotComposer.compose(shot: shot, selection: area,
                                                             annotations: annotations))
-        let bitmap = try XCTUnwrap(NSBitmapImageRep(cgImage: image))
-        // 下面全部按「1 点 = 1 像素」写坐标。帧是 1:1 合成的，只有离屏窗口的 backing
-        // scale 不是 1（Retina 屏上跑测试）时两者才会不一致 —— 那是环境前提，不是产品
-        // 缺陷，所以跳过而不是硬失败。
-        if bitmap.pixelsWide != Int(area.width) {
-            throw XCTSkip("离屏渲染比例 \(bitmap.pixelsWide)/\(Int(area.width)) ≠ 帧比例，按像素写的断言不适用")
-        }
-        return bitmap
+        // 成品跟着屏的 backing scale 出图（Retina 上是 2x），而下面全部按「1 点 = 1 像素」
+        // 写坐标。先画回 1:1 再断言：原先这里在比例不符时整条跳过，等于 Retina 机器上
+        // 这批断言全不跑（见 OffscreenSampling.swift）。
+        return try XCTUnwrap(NSBitmapImageRep.oneToOne(from: image, pointSize: area.size))
     }
 
     func testComposeWithoutAnnotationsIsThePlainCrop() throws {
