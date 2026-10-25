@@ -71,6 +71,14 @@ Power by [![mtjo](https://github.com/mtjo/MacStroke/raw/release/logo-mtjo.png)](
 
 ---
 
+## 致谢
+
+- [Mac Mouse Fix](https://github.com/noah-nuebling/mac-mouse-fix) — 滚轮平滑滚动（`SmoothWheelAnimator`）复刻自其 High smoothness / High speed 路径。按 [MMF License](https://github.com/noah-nuebling/mac-mouse-fix/blob/master/License) 要求注明来源；两项目相互独立，无隶属或背书关系
+- [Sparkle](https://github.com/sparkle-project/Sparkle) — 应用内更新
+- [SQLite.swift](https://github.com/stephencelis/SQLite.swift) — 历史粘贴板持久化
+
+---
+
 ## 源码与构建（Swift 版）
 
 - Swift 5.9+，Swift Package Manager，SwiftUI + AppKit 混合 UI，SQLite.swift 持久化
