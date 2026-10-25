@@ -117,6 +117,35 @@ public enum MousePhase {
     case up
 }
 
+/// A captured scroll-wheel event, normalized into line units.
+///
+/// Discrete wheels report whole detents in `deltaAxis`; high-resolution wheels
+/// and trackpads report pixels in `pointDelta`, so the capture layer divides
+/// those by an observed 10 points-per-line to keep one accumulation space.
+/// Momentum events are flagged instead of dropped, so the delegate can decide.
+public struct ScrollEvent {
+    /// Horizontal delta in lines; positive scrolls left (same sign convention
+    /// as the vertical axis, where positive is up).
+    public let deltaX: Double
+    /// Vertical delta in lines; positive is up.
+    public let deltaY: Double
+    /// True for trackpad / high-resolution wheels (pixel deltas).
+    public let isContinuous: Bool
+    /// True while the OS replays a gesture's momentum tail.
+    public let isMomentum: Bool
+    /// The modifier keys held when the event was captured.
+    public let modifiers: Set<GestureModifier>
+
+    public init(deltaX: Double, deltaY: Double, isContinuous: Bool,
+                isMomentum: Bool, modifiers: Set<GestureModifier> = []) {
+        self.deltaX = deltaX
+        self.deltaY = deltaY
+        self.isContinuous = isContinuous
+        self.isMomentum = isMomentum
+        self.modifiers = modifiers
+    }
+}
+
 /// Delegate for receiving captured mouse events.
 public protocol EventCaptureDelegate: AnyObject {
     /// Handle a captured mouse event.
@@ -124,6 +153,21 @@ public protocol EventCaptureDelegate: AnyObject {
     ///   propagate to other applications; `false` to let it pass through.
     @discardableResult
     func eventCapture(_ capture: EventCapture, didReceive event: MouseEvent) -> Bool
+
+    /// Handle a captured scroll-wheel event.
+    /// - Returns: `true` to consume (swallow) the event so the front app does
+    ///   not scroll; `false` to let it pass through.
+    @discardableResult
+    func eventCapture(_ capture: EventCapture, didReceiveScroll event: ScrollEvent) -> Bool
+}
+
+extension EventCaptureDelegate {
+    /// Default: never claim scroll events, so delegates that only care about
+    /// button strokes (and every existing test double) keep working.
+    @discardableResult
+    public func eventCapture(_ capture: EventCapture, didReceiveScroll event: ScrollEvent) -> Bool {
+        false
+    }
 }
 
 /// Global mouse event capture using CGEventTap.
@@ -157,11 +201,18 @@ public class EventCapture: NSObject {
             CGEventType.rightMouseDown, .rightMouseDragged, .rightMouseUp,
             .leftMouseDown,
             .otherMouseDown, .otherMouseDragged, .otherMouseUp,
+            .scrollWheel,
         ] {
             mask |= CGEventMask(1 << type.rawValue)
         }
         return mask
     }()
+
+    /// Points per scroll line. Measured, not guessed: macOS converts line-based
+    /// scrolls at a fixed 10 points per line (the screenshot long-capture code
+    /// relies on the same constant), so dividing pixel deltas by it puts
+    /// high-resolution wheels in the same units as discrete detents.
+    static let pointsPerLine: Double = 10
 
     /// Height of the primary screen, used to convert CG (top-left origin)
     /// global coordinates to AppKit (bottom-left origin) global coordinates.
@@ -248,6 +299,16 @@ public class EventCapture: NSObject {
             return Unmanaged.passRetained(event)
         }
 
+        if type == .scrollWheel {
+            // Our own injected notch (from a rule action) must never come back
+            // in as a gesture; pass it straight through to the front app.
+            if Self.isInjectedScroll(event) {
+                return Unmanaged.passRetained(event)
+            }
+            let consume = delegate?.eventCapture(self, didReceiveScroll: Self.scrollEvent(from: event)) ?? false
+            return consume ? nil : Unmanaged.passRetained(event)
+        }
+
         // Only the event types in our mask reach here; convert to AppKit
         // bottom-left-origin global coordinates like the original's
         // [NSEvent eventWithCGEvent:] + locationInWindow convention.
@@ -295,6 +356,40 @@ public class EventCapture: NSObject {
             return nil
         }
         return Unmanaged.passRetained(event)
+    }
+
+    /// Normalize a CG scroll event into line units.
+    ///
+    /// Discrete wheels carry whole detents in `scrollWheelEventDeltaAxis*`;
+    /// high-resolution wheels and trackpads carry pixels in
+    /// `scrollWheelEventPointDeltaAxis*`, which is why the two are read
+    /// separately instead of trusting one field.
+    /// True when this scroll event was injected by our own ActionExecutor.
+    static func isInjectedScroll(_ event: CGEvent) -> Bool {
+        event.getIntegerValueField(.eventSourceUserData) == InjectedEvent.tag
+    }
+
+    static func scrollEvent(from event: CGEvent) -> ScrollEvent {
+        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+        let isMomentum = event.getIntegerValueField(.scrollWheelEventMomentumPhase) != 0
+
+        let rawX: Double
+        let rawY: Double
+        if isContinuous {
+            rawX = Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)) / pointsPerLine
+            rawY = Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)) / pointsPerLine
+        } else {
+            rawX = Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
+            rawY = Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
+        }
+
+        return ScrollEvent(
+            deltaX: rawX,
+            deltaY: rawY,
+            isContinuous: isContinuous,
+            isMomentum: isMomentum,
+            modifiers: GestureModifier.all(in: event.flags)
+        )
     }
 
     deinit {

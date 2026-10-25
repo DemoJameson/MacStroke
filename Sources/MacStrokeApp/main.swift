@@ -170,6 +170,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 ?? StorageDefaults.swallowUnmatchedGesture
         }
 
+        // 瞬时手势（按住触发键时滚轮 / 中键 / 侧键）。每次现读规则，所以新加的规则
+        // 立刻生效，不用重启。没有匹配的规则时返回 false，事件原样交回前台应用，
+        // 中键粘贴、侧键前进后退、普通滚动都不受影响。
+        canvas.impulseHandler = { [weak self] gesture, bundleID in
+            guard let self = self, let ruleStore = self.ruleStore,
+                  let rule = ruleStore.match(impulse: gesture, bundleID: bundleID) else {
+                return false
+            }
+            NSLog("%@", "[AppDelegate] Impulse matched: \(rule.name) (\(gesture.rawValue))")
+            self.performRule(rule)
+            return true
+        }
+
         // Initialize rule store / engine. The pre-3.0 build archived its rules
         // in UserDefaults while this one keeps rules.json, so an upgraded
         // preferences domain has to be read across before anything else touches
@@ -198,6 +211,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let savedLanguage = storage.getStringOptional(forKey: .language) {
             applyUserLanguage(savedLanguage)
         }
+
+        installEditMenu()
 
         initAppAtFirstLaunch()
 
@@ -614,6 +629,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     name: old.name,
                     description: old.description,
                     template: template,
+                    // Drawing a trajectory replaces whatever trigger the rule
+                    // had, so an impulse must not survive alongside it.
+                    impulse: nil,
                     minSimilarityScore: old.minSimilarityScore,
                     action: old.action,
                     note: old.note,
@@ -723,6 +741,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// The app is LSUIElement and never builds a main menu, but without an
+    /// Edit menu the ⌘C / ⌘V / ⌘X key equivalents have nowhere to route —
+    /// the Rules table's text fields then silently drop paste/copy/cut.
+    /// A hidden standard Edit menu restores the shortcuts without adding a
+    /// visible menu bar to a status-bar app.
+    private func installEditMenu() {
+        let mainMenu = NSMenu()
+
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        // ⇧⌘Z：keyEquivalent 不区分大小写，"Z" 不加 Shift 修饰注册的仍是 ⌘Z，
+        // Shift+⌘Z 不会路由到 redo:。
+        let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        NSApp.mainMenu = mainMenu
+    }
+
     private func initSparkleUpdater() {
         // Use SPUStandardUpdaterController for automatic update checking and UI.
         // Feed URL & DSA key come from Info.plist (SUFeedURL / SUPublicDSAKeyFile),
@@ -821,7 +866,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(withTitle: L("Screenshot or record"), action: #selector(toggleScreenshot(_:)), keyEquivalent: "")
         statusMenuItem(to: menu, titleKey: "Remote Control", tab: .remoteControl)
         menu.addItem(withTitle: L("Check for Updates"), action: #selector(checkForUpdates(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: L("Quit"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        let quit = menu.addItem(withTitle: L("Quit"), action: #selector(quitFromMenu(_:)), keyEquivalent: "")
+        quit.target = self
         return menu
     }
 
@@ -952,27 +998,31 @@ extension AppDelegate: CanvasManagerDelegate {
             return false
         }
         NSLog("%@", "[AppDelegate] Rule matched: \(rule.name) (score: \(score))")
+        performRule(rule)
+        return true
+    }
 
-        // Execute the action
+    /// Execute a matched rule's action and show its note toast.
+    ///
+    /// Shared by the drawn-stroke path and the impulse-gesture path so both
+    /// trigger kinds behave identically (same executor wiring, same toast).
+    func performRule(_ rule: Rule) {
         let executor = ActionExecutor()
         executor.onScreenshotRequested = { ScreenshotController.shared.toggle() }
         executor.execute(rule.action, for: rule)
 
         // Show the note toast if enabled (original: showGestureNote key).
         let showGestureNote = storage.getBoolOptional(forKey: .showGestureNote) ?? StorageDefaults.showGestureNote
-        if showGestureNote && !rule.note.isEmpty {
-            let preferences = UserPreferences()
-            let positionIndex = preferences.notePosition
-            let pos = ToastPosition(rawValue: positionIndex) ?? ToastPosition.center
-            let toast = Toast(
-                message: rule.note,
-                duration: TimeInterval(preferences.noteRetentionTime),
-                position: pos
-            )
-            ToastManager.shared.show(toast)
-        }
-
-        return true
+        guard showGestureNote, !rule.note.isEmpty else { return }
+        let preferences = UserPreferences()
+        let positionIndex = preferences.notePosition
+        let pos = ToastPosition(rawValue: positionIndex) ?? ToastPosition.center
+        let toast = Toast(
+            message: rule.note,
+            duration: TimeInterval(preferences.noteRetentionTime),
+            position: pos
+        )
+        ToastManager.shared.show(toast)
     }
 }
 

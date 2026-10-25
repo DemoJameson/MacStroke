@@ -352,7 +352,6 @@
 "Delete Rule" = "删除规则";
 "Automatically Download Updates" = "自动下载更新";
 
-
 /* AppleScript tab (original Preferences.xib pane) */
 "Load Example" = "载入样例脚本";
 "Enter AppleScript here" = "Enter AppleScript here";
@@ -478,3 +477,21 @@
 "Proximity event empty password" = "存的密码是空的";
 "Proximity event injection aborted" = "注入中途屏幕状态变了，已中止";
 "Proximity event injection failed" = "解锁失败（密码不对或密码框没接受输入）";
+
+// Impulse gestures (button held while scrolling / clicking)
+
+// Mouse shortcut recording
+"Middle Button" = "鼠标中键";
+"Wheel ↑" = "滚轮上滚";
+"Wheel ↓" = "滚轮下滚";
+"Wheel ←" = "滚轮左压";
+"Wheel →" = "滚轮右压";
+"Recording… press a key or mouse button (Esc to cancel)" = "录制中… 按一个键或鼠标按键（Esc 取消）";
+
+// Impulse gesture names
+"Left Button" = "鼠标左键";
+"Right Button" = "鼠标右键";
+"Wheel Up" = "滚轮上滚";
+"Wheel Down" = "滚轮下滚";
+"Button 4" = "按键4";
+"Button 5" = "按键5";

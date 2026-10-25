@@ -135,6 +135,9 @@ struct ShortcutRecorder: NSViewRepresentable {
     /// Records a modifier combination only, committed when the keys are
     /// released (the gesture-suppression row, issue #59).
     var modifiersOnly = false
+    /// Let the recorder capture wheel notches and momentary mouse buttons too
+    /// (the Hot Key action, so a rule can be bound to a mouse input).
+    var recordsMouseInput = false
     @Environment(\.colorScheme) private var colorScheme
 
     /// The scheme this page is actually drawing in, translated for the AppKit view.
@@ -149,6 +152,7 @@ struct ShortcutRecorder: NSViewRepresentable {
         let view = ShortcutRecorderView()
         view.drawAppearance = hostAppearance
         view.modifiersOnly = modifiersOnly
+        view.recordsMouseInput = recordsMouseInput
         // Show the persisted shortcut (e.g. the ⌘V default) right away.
         if let parsed = Self.parse(text) {
             view.keyCode = parsed.keyCode
@@ -170,6 +174,7 @@ struct ShortcutRecorder: NSViewRepresentable {
 
     func updateNSView(_ nsView: ShortcutRecorderView, context: Context) {
         nsView.modifiersOnly = modifiersOnly
+        nsView.recordsMouseInput = recordsMouseInput
         if nsView.drawAppearance?.name != hostAppearance?.name {
             nsView.drawAppearance = hostAppearance
         }
@@ -757,11 +762,13 @@ struct RulesTabView: View {
     /// the recording plumbing still addresses rules by name.
     private func drawGesture(row: Int) {
         guard ruleStore.rules.indices.contains(row) else { return }
-        drawGesture(ruleStore.rules[row].name)
+        GestureRecordFlow.record(ruleIndex: row, ruleName: ruleStore.rules[row].name, store: ruleStore)
     }
 
+    /// Screenshot rules are addressed by their fixed name (there is exactly one).
     private func drawGesture(_ ruleName: String) {
-        GestureRecordFlow.record(ruleName: ruleName, store: ruleStore)
+        guard let index = ruleStore.rules.firstIndex(where: { $0.name == ruleName }) else { return }
+        GestureRecordFlow.record(ruleIndex: index, ruleName: ruleName, store: ruleStore)
     }
 
     /// Original bottom-bar button: multi-select running apps (AppPickerWindow-
@@ -771,6 +778,14 @@ struct RulesTabView: View {
     private func pickAppForSelectedRule() {
         guard ruleStore.rules.indices.contains(selectedRow) else { return }
         let oldRule = ruleStore.rules[selectedRow]
+
+        // The SwiftUI button never becomes first responder, so an open Filter /
+        // Note field editor would stay open across the modal. The picker would
+        // then overwrite the model while the editor still holds the old text,
+        // and reloadIfNeeded() (gated on isEditing) silently kept the stale
+        // value. Commit the editor first: this saves whatever is typed in the
+        // row and closes the editor.
+        RulesTable.commitActiveFieldEditor()
 
         let preselected = Set(oldRule.filter
             .components(separatedBy: CharacterSet(charactersIn: "|\n"))
@@ -782,6 +797,9 @@ struct RulesTabView: View {
             name: oldRule.name,
             description: oldRule.description,
             template: oldRule.template,
+            // Picking an app narrows where the rule applies; it must not clear
+            // the gesture that fires it.
+            impulse: oldRule.impulse,
             minSimilarityScore: oldRule.minSimilarityScore,
             action: oldRule.action,
             note: oldRule.note,

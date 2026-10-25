@@ -9,6 +9,7 @@
 
 import AppKit
 import SwiftUI
+import GestureEngine
 import RuleEngine
 import Storage
 import AppleScriptRunner
@@ -220,11 +221,23 @@ extension RulesTable {
             publishSelection()
         }
 
-        private func currentSignature() -> String {
+        /// Rows are reloaded when this changes. Anything that alters how a cell
+        /// is drawn has to be part of it — a renamed gesture or a newly set
+        /// impulse otherwise leaves a stale Image/row behind.
+        func currentSignature() -> String {
             store.rules.map { rule in
                 let spare = rule.spareActions
+                let shortcutValue: (code: UInt16, flag: UInt)
+                if case .shortcut(let code, let flag) = rule.action {
+                    shortcutValue = (code, flag)
+                } else {
+                    shortcutValue = (UInt16(truncatingIfNeeded: spare.shortcutCode),
+                                     UInt(truncatingIfNeeded: spare.shortcutFlag))
+                }
                 return "\(rule.name)\u{1}\(rule.note)\u{1}\(rule.filter)\u{1}"
                     + "\(rule.template.points.count)\u{1}\(Self.typeIndex(for: rule.action))\u{1}"
+                    + "\(rule.impulse?.rawValue ?? "")\u{1}"
+                    + "\(shortcutValue.code)\u{1}\(shortcutValue.flag)\u{1}"
                     + "\(spare.text)\u{1}\(spare.password)\u{1}\(spare.appleScriptId)"
             }.joined(separator: "\u{2}")
         }
@@ -273,6 +286,39 @@ extension RulesTable {
         }
 
         private func addGestureCell(to container: NSView, rule: Rule, row: Int) {
+            if let impulse = rule.impulse {
+                // Same glyph and the same proportions as the picker tile, so the
+                // two surfaces read as one icon. The whole stack (glyph + name)
+                // is centred vertically in the 84pt row instead of being pinned
+                // to the top with a gap underneath.
+                let rowHeight = container.bounds.height > 0 ? container.bounds.height : 84
+                let labelHeight: CGFloat = 16
+                let gap: CGFloat = 6
+                let glyphSide = ImpulseGlyph.intrinsicSize.height
+                let stackHeight = glyphSide + gap + labelHeight
+                let top = (rowHeight - stackHeight) / 2
+
+                let glyph = ImpulseGlyphView(
+                    gesture: impulse,
+                    frame: NSRect(x: 0, y: top + labelHeight + gap,
+                                  width: 84, height: glyphSide)
+                )
+                glyph.onDoubleClick = { [weak self] in self?.onDrawGesture(row) }
+                container.addSubview(glyph)
+
+                let label = NSTextField(labelWithString: L(impulse.displayName))
+                label.alignment = .center
+                label.font = .systemFont(ofSize: 10.5)
+                label.textColor = .secondaryLabelColor
+                // "Wheel Down" / "Middle Button" are wider than the 84pt column
+                // at this size; let the label overflow symmetrically instead of
+                // truncating to "Wheel" / "Middle".
+                let labelWidth = label.intrinsicContentSize.width + 8
+                label.frame = NSRect(x: (84 - labelWidth) / 2, y: top,
+                                     width: labelWidth, height: labelHeight)
+                container.addSubview(label)
+                return
+            }
             guard !rule.template.points.isEmpty else {
                 // Original: an empty trajectory renders a "Draw Gesture" button
                 // instead of the canvas.
@@ -333,6 +379,9 @@ extension RulesTable {
                 // 这一格不给清除按钮：动作存的是「要按下哪个键」，(0,0) 在模型里是
                 // 「按下 A」而不是「没有」，置空等于给规则塞进一个会打字键的动作。
                 recorder.showsClearButton = false
+                // Hot Key also accepts mouse inputs (middle/side click, wheel
+                // notch), which is how an impulse gesture gets its action.
+                recorder.recordsMouseInput = true
                 let (keyCode, flags) = shortcutValue(of: rule)
                 recorder.keyCode = keyCode
                 recorder.flags = flags
@@ -576,14 +625,22 @@ private extension Rule {
         return copying(action: action, spare: spare)
     }
 
+    /// Rebuild the rule with one field changed.
+    ///
+    /// Every stored field has to be carried over explicitly. Dropping `impulse`
+    /// here silently erased a chosen gesture as soon as the user edited the
+    /// action, the filter or the note — the row still looked fine but the
+    /// trigger was gone.
     func copying(name newName: String? = nil, note newNote: String? = nil,
                  filter newFilter: String? = nil, filterType newFilterType: String? = nil,
                  action newAction: RuleAction? = nil,
-                 spare newSpare: RuleSpareActions? = nil) -> Rule {
+                 spare newSpare: RuleSpareActions? = nil,
+                 impulse newImpulse: ImpulseGesture? = nil) -> Rule {
         Rule(
             name: newName ?? name,
             description: description,
             template: template,
+            impulse: newImpulse ?? impulse,
             minSimilarityScore: minSimilarityScore,
             action: newAction ?? action,
             note: newNote ?? note,

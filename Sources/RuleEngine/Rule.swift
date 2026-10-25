@@ -194,6 +194,8 @@ public struct Rule: Codable {
     public let note: String
     /// The gesture template to match against
     public let template: GestureTemplate
+    /// Non-drawing impulse this rule matches; nil keeps the legacy stroke meaning.
+    public let impulse: ImpulseGesture?
     /// The minimum similarity score (0..100) required for a match
     public let minSimilarityScore: Double
     /// The action to execute when the rule matches
@@ -226,6 +228,7 @@ public struct Rule: Codable {
         name: String,
         description: String,
         template: GestureTemplate,
+        impulse: ImpulseGesture? = nil,
         minSimilarityScore: Double = 30.0,
         action: RuleAction,
         note: String = "",
@@ -238,6 +241,7 @@ public struct Rule: Codable {
         self.name = name
         self.description = description
         self.template = template
+        self.impulse = impulse
         self.minSimilarityScore = minSimilarityScore
         self.action = action
         self.note = note
@@ -259,6 +263,7 @@ public struct Rule: Codable {
     /// minSimilarityScore, isEnabled) are not stored.
     private enum RuleKeys: String, CodingKey {
         case direction, data, filter, filterType, actionType, text, password
+        case impulse
         case shortcutCode = "shortcut_code"
         case shortcutFlag = "shortcut_flag"
         case appleScriptId = "apple_script_id"
@@ -279,6 +284,7 @@ public struct Rule: Codable {
             points: points.map { GesturePoint(x: $0.x, y: $0.y) },
             name: name
         )
+        impulse = try c.decodeIfPresent(ImpulseGesture.self, forKey: .impulse)
         filter = try c.decode(String.self, forKey: .filter)
         filterType = try c.decode(Int.self, forKey: .filterType) == 1 ? "regex" : "wildcard"
         note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
@@ -319,6 +325,9 @@ public struct Rule: Codable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: RuleKeys.self)
         try c.encode(name, forKey: .direction)
+        if let impulse {
+            try c.encode(impulse.rawValue, forKey: .impulse)
+        }
         try c.encode(template.points.map { StoredPoint(x: $0.x, y: $0.y) }, forKey: .data)
         try c.encode(filter, forKey: .filter)
         try c.encode(filterType == "regex" ? 1 : 0, forKey: .filterType)
@@ -396,6 +405,9 @@ public final class RuleEngine {
         normalizedStroke.normalize()
 
         for rule in rules where rule.isEnabled {
+            // Impulse rules carry an empty template: `Stroke` refuses empty
+            // point arrays, and they are matched by `match(impulse:)` instead.
+            guard rule.impulse == nil else { continue }
             let score = compare(
                 template: rule.template.stroke,
                 candidate: normalizedStroke
@@ -450,6 +462,18 @@ public final class RuleEngine {
     ///   - bundleID: The frontmost application's bundle ID ("" when it has none,
     ///     matching the original's `frontBundleName()`)
     /// - Returns: The best-matching rule and its similarity score, or nil if no match.
+    /// Match an impulse gesture exactly. Stroke rules never participate;
+    /// their DTW path and score gates stay untouched.
+    public func match(impulse: ImpulseGesture, bundleID: String) -> Rule? {
+        if !BlackWhiteFilter.shared.shouldHookMouseEventForApp(bundleID) {
+            return nil
+        }
+        return rules.first {
+            $0.isEnabled && $0.impulse == impulse &&
+                matchesFilter(filter: $0.filter, type: $0.filterType, bundleID: bundleID)
+        }
+    }
+
     public func match(stroke: Stroke, bundleID: String) -> (rule: Rule, score: Double)? {
         // Check BlackWhiteFilter first: if the app is blocked, no rules match
         if !BlackWhiteFilter.shared.shouldHookMouseEventForApp(bundleID) {
@@ -471,6 +495,9 @@ public final class RuleEngine {
         var bestScore: Double = 0.0
 
         for rule in rules where rule.isEnabled {
+            // Impulse rules are matched by `match(impulse:)`; their templates are
+            // empty and must never enter the DTW path.
+            guard rule.impulse == nil else { continue }
             // Original: every rule's filter is evaluated, so a rule whose filter
             // matches nothing is skipped even when the filter field is empty.
             if !matchesFilter(filter: rule.filter, type: rule.filterType, bundleID: bundleID) {

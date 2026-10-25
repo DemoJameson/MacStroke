@@ -10,10 +10,12 @@ import GestureEngine
 final class PresetGesturePickerPanelTests: XCTestCase {
     @MainActor
     func testSinglePageShowsEveryPreset() throws {
-        let entries = GestureTemplateProvider.shared.presetPickerEntries
+        let entries = GestureTemplateProvider.shared.presetPickerEntries.map {
+            PresetGesturePickerPanel.Entry(name: $0.name, stroke: $0.stroke)
+        }
         XCTAssertEqual(entries.count, 68)
 
-        let window = PresetGesturePickerPanel().makeWindow(entries: entries)
+        let window = PresetGesturePickerPanel(triggerButtonNumber: 99).makeWindow(entries: entries)
         let content = try XCTUnwrap(window.contentView)
         let grid = try XCTUnwrap(
             content.subviews.first { $0.identifier?.rawValue == "PresetGestureGrid" }

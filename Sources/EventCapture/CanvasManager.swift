@@ -90,6 +90,13 @@ public class CanvasManager: EventCaptureDelegate {
     /// branch can only be verified by moving the real pointer.
     var syntheticEventSink: ((CGEvent, CGEventTapLocation) -> Void)?
 
+    /// Runs a matched impulse gesture and reports whether it was handled.
+    /// The app layer owns this: it looks the gesture up in the rule store and
+    /// executes the action, so RuleEngine stays out of EventCapture. Unset
+    /// means no impulse rule can match, which leaves the plain wheel/click
+    /// behaviour of the trigger button untouched.
+    public var impulseHandler: ((ImpulseGesture, String) -> Bool)?
+
     /// Ignore gesture starts for a moment, while preferences are waiting for
     /// the user to press the button they want to bind. Deliberately separate
     /// from `isEnabled`, which is the master switch the preferences own.
@@ -125,6 +132,24 @@ public class CanvasManager: EventCaptureDelegate {
     private var downLocation: GesturePoint?
     /// Whether the front app passed the capture filter for the current gesture.
     private var shouldShow = false
+    /// App that was frontmost when the trigger went down. Keep using it for
+    /// every impulse during this press: showing our transparent canvas can
+    /// change NSWorkspace.frontmostApplication, and re-reading it would make
+    /// the second wheel notch target MacStroke itself instead of the user app.
+    private var capturedBundleID: String?
+    /// True once an impulse fired during this trigger press. The press then
+    /// belongs to the scroll/click, not the gesture, so releasing the trigger
+    /// must not replay it (a synthetic right-click would pop the context menu
+    /// on top of the scroll the user just performed).
+    private var didFireImpulse = false
+    /// CG button numbers whose impulse click-down was consumed, so the matching
+    /// up is consumed too instead of reaching the front app as a stray click.
+    private var consumedImpulseButtons: Set<Int> = []
+    /// Sub-line wheel movement carried between events. A discrete wheel always
+    /// moves in whole detents, but a high-resolution wheel reports pixels, so
+    /// accumulating them is what keeps "one line = one action" true. Only the
+    /// vertical axis accumulates: tilt input has no gesture and passes through.
+    private var wheelAccumulatorY: Double = 0
 
     // MARK: - Canvas windows
 
@@ -165,14 +190,23 @@ public class CanvasManager: EventCaptureDelegate {
     public func eventCapture(_ capture: EventCapture, didReceive event: MouseEvent) -> Bool {
         switch event.phase {
         case .down:
+            // A momentary click on any non-trigger button counts as an impulse
+            // while the gesture trigger is held. Outside that window these
+            // buttons keep their native behaviour (left click, middle-click
+            // paste, back/forward). The trigger button itself must never become
+            // an impulse — the Rules page offers "Left/Right Button" gestures
+            // for the *other* buttons only.
+            if isTriggerAllowed(event.button) {
+                return handleTriggerMouseDown(event)
+            }
+            if handleImpulseClickDown(event) { return true }
             switch event.button {
             case .left:
                 // Original AppDelegate.m:431-438 — while a gesture is in
                 // progress, left clicks are swallowed to avoid mis-fires.
                 return shouldShow && isCapturing
             default:
-                guard isTriggerAllowed(event.button) else { return false }
-                return handleTriggerMouseDown(event)
+                return false
             }
 
         case .moved:
@@ -191,9 +225,98 @@ public class CanvasManager: EventCaptureDelegate {
             return true
 
         case .up:
+            if isCapturing, consumedImpulseButtons.remove(event.button.cgNumber) != nil {
+                return true
+            }
             guard shouldShow, isCapturing, event.button == activeTrigger else { return false }
             return handleTriggerMouseUp(event)
         }
+    }
+
+    /// Handle a scroll-wheel event. The trigger button being held is what turns
+    /// a wheel notch into an impulse; otherwise scrolling is untouched.
+    /// - Returns: true to consume (swallow) the scroll event.
+    @discardableResult
+    public func eventCapture(_ capture: EventCapture, didReceiveScroll event: ScrollEvent) -> Bool {
+        guard isEnabled, !isSuspended, isCapturing, !isRecordingGesture else { return false }
+        // Momentum is the OS replaying a flick after the fingers stopped; it
+        // must not fire further impulses, and it must not be swallowed either.
+        guard !event.isMomentum else { return false }
+        return consumeWheel(event)
+    }
+
+    // MARK: - Impulse gestures
+
+    /// Fire the impulse a non-trigger button press stands for (left, right,
+    /// middle, side).
+    ///
+    /// Only the momentum of the press matters here: the matching up is claimed
+    /// too (via `consumedImpulseButtons`) so the front app sees neither half of
+    /// a click the user aimed at MacStroke.
+    /// - Returns: true when an impulse rule handled the press and both halves
+    ///   of the click must be swallowed.
+    private func handleImpulseClickDown(_ event: MouseEvent) -> Bool {
+        guard isEnabled, !isSuspended, isCapturing, !isRecordingGesture else { return false }
+        let number = event.button.cgNumber
+
+        let gesture: ImpulseGesture
+        switch number {
+        case 0: gesture = .leftClick
+        case 1: gesture = .rightClick
+        case 2: gesture = .middleClick
+        case 3: gesture = .button4
+        case 4: gesture = .button5
+        default: return false
+        }
+        guard let handled = runImpulse(gesture), handled else { return false }
+        consumedImpulseButtons.insert(number)
+        return true
+    }
+
+    /// Accumulate wheel deltas and fire one impulse per whole line.
+    ///
+    /// A discrete wheel reports whole detents, so each event crosses the
+    /// threshold exactly once. A high-resolution wheel trickles in fractions of
+    /// a line: the remainder is kept, and crossing a line fires exactly one
+    /// action no matter how the OS split the movement.
+    /// - Returns: true to consume the scroll event.
+    private func consumeWheel(_ event: ScrollEvent) -> Bool {
+        // Shared with the recorder: macOS swaps and flips Shift+vertical
+        // scroll, and a tilt-only input has no gesture to fire.
+        let delta = WheelDelta(
+            x: event.deltaX,
+            y: event.deltaY,
+            shifted: event.modifiers.contains(.shift)
+        )
+        let physical = delta.physical
+        guard abs(physical.y) > 0, abs(physical.y) >= abs(physical.x) else {
+            return false
+        }
+
+        var accumulator = wheelAccumulatorY
+        accumulator += physical.y
+        let steps = accumulator.rounded(.towardZero)
+        wheelAccumulatorY = accumulator - steps
+
+        guard abs(steps) >= 1 else { return false }
+        // Positive physical delta = rolled toward the user (down).
+        let gesture: ImpulseGesture = steps > 0 ? .wheelDown : .wheelUp
+        guard let handled = runImpulse(gesture), handled else {
+            // Nothing matched: hand the movement back rather than eating it,
+            // but drop the accumulation so the front app gets the raw event.
+            wheelAccumulatorY = 0
+            return false
+        }
+        return true
+    }
+
+    /// Ask the app layer to run the impulse for the front app.
+    private func runImpulse(_ gesture: ImpulseGesture) -> Bool? {
+        guard let impulseHandler else { return nil }
+        let bundleID = capturedBundleID ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        guard impulseHandler(gesture, bundleID) else { return nil }
+        didFireImpulse = true
+        return true
     }
 
     /// Whether the given button may start a gesture. The app layer owns the
@@ -282,6 +405,14 @@ public class CanvasManager: EventCaptureDelegate {
             // 整段吞掉。判据只看「这一下是不是真的画了一条」：纯单击仍走下面的回放。
             NSLog("%@", "[CanvasManager] Unmatched gesture swallowed (no click replay)")
             consumed = true
+        } else if didFireImpulse {
+            // The press was consumed as an impulse (scrolling or a momentary
+            // click), so the trigger button itself was never meant to click.
+            // Replaying it now would pop a context menu on top of the scroll
+            // the user just performed — regardless of whether a partial drag
+            // happened to accompany the scrolling.
+            NSLog("%@", "[CanvasManager] Trigger press belonged to an impulse (no click replay)")
+            consumed = true
         } else {
             // No gesture matched: give the click back to the app so the button
             // still does whatever it normally does.
@@ -338,6 +469,10 @@ public class CanvasManager: EventCaptureDelegate {
         activeTrigger = nil
         downLocation = nil
         shouldShow = false
+        capturedBundleID = nil
+        didFireImpulse = false
+        consumedImpulseButtons.removeAll()
+        wheelAccumulatorY = 0
 
         hideAllCanvasWindows()
     }

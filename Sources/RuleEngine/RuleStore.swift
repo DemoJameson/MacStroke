@@ -94,6 +94,20 @@ public final class RuleStore: ObservableObject {
         return true
     }
 
+    /// Replace a rule by its position.
+    ///
+    /// Rules created from the "+" button all start out named "Double click
+    /// Modify", so names are not unique and a name-based lookup can silently
+    /// edit the wrong row. Callers that already know the row use this instead.
+    /// - Returns: true when the index was in range.
+    @discardableResult
+    public func replace(at index: Int, with rule: Rule) -> Bool {
+        guard rules.indices.contains(index) else { return false }
+        rules[index] = rule
+        save()
+        return true
+    }
+
     /// Remove a rule by name.
     /// - Parameter name: The rule name to remove.
     /// - Returns: The removed rule, or nil if not found.

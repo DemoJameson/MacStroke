@@ -209,7 +209,8 @@ struct ScreenshotTabView: View {
         if ruleStore.installScreenshotRule() {
             NotificationCenter.default.post(name: .macStrokeRuleStoreDidChange, object: nil)
         }
-        GestureRecordFlow.record(ruleName: RuleStore.screenshotRuleName, store: ruleStore)
+        guard let index = ruleStore.rules.firstIndex(where: { $0.name == RuleStore.screenshotRuleName }) else { return }
+        GestureRecordFlow.record(ruleIndex: index, ruleName: RuleStore.screenshotRuleName, store: ruleStore)
     }
 
     private func removeGesture() {

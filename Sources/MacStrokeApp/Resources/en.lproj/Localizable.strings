@@ -350,7 +350,6 @@
 
 "General Settings" = "General";
 
-
 /* AppleScript tab (original Preferences.xib pane) */
 "Load Example" = "Load Example";
 "Enter AppleScript here" = "Enter AppleScript here";
@@ -476,3 +475,21 @@
 "Proximity event empty password" = "The stored password is empty";
 "Proximity event injection aborted" = "The screen state changed mid-typing; aborted";
 "Proximity event injection failed" = "Unlock failed (wrong password, or the field did not take the input)";
+
+// Impulse gestures (button held while scrolling / clicking)
+
+// Mouse shortcut recording
+"Middle Button" = "Middle Button";
+"Wheel ↑" = "Wheel ↑";
+"Wheel ↓" = "Wheel ↓";
+"Wheel ←" = "Wheel ←";
+"Wheel →" = "Wheel →";
+"Recording… press a key or mouse button (Esc to cancel)" = "Recording… press a key or mouse button (Esc to cancel)";
+
+// Impulse gesture names
+"Left Button" = "Left Button";
+"Right Button" = "Right Button";
+"Wheel Up" = "Wheel Up";
+"Wheel Down" = "Wheel Down";
+"Button 4" = "Button 4";
+"Button 5" = "Button 5";

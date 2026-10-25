@@ -18,12 +18,49 @@ final class PresetGesturePickerPanel: NSObject, NSWindowDelegate {
     /// What the user clicked, or `nil` when the dialog was dismissed.
     private struct Choice {
         let name: String
-        let stroke: Stroke
+        let stroke: Stroke?
+        let impulse: ImpulseGesture?
+    }
+
+    /// A picker entry: a drawn preset or one of the impulse gestures that fire
+    /// while the trigger button is held (button + wheel / momentary buttons).
+    struct Entry {
+        let name: String
+        /// Only drawn presets have a trajectory. `Stroke` traps on an empty
+        /// point array, so impulse entries carry nil instead of a blank stroke.
+        let stroke: Stroke?
+        let impulse: ImpulseGesture?
+        /// 仅测试构造用：run() 已在数据源层过滤触发键自身，不渲染禁用格。
+        let disabled: Bool
+
+        init(name: String, stroke: Stroke) {
+            self.name = name
+            self.stroke = stroke
+            self.impulse = nil
+            self.disabled = false
+        }
+
+        init(impulse: ImpulseGesture, disabled: Bool = false) {
+            // Localise the caption so the picker reads "Wheel Down" / "Middle
+            // Button" like every other label instead of a truncated raw name.
+            self.name = L(impulse.displayName)
+            self.stroke = nil
+            self.impulse = impulse
+            self.disabled = disabled
+        }
     }
 
     /// Sized so all 68 presets fit on one page — the grid never scrolls.
     private static let columns = 10
     private static let cellSide: CGFloat = 56
+    /// The mouse-input row sits below the drawn presets. Its five labels are
+    /// wider than a square stroke tile ("Middle Button" is the longest), so its
+    /// cells span the whole grid width equally instead of sharing the square
+    /// grid columns.
+    private static let impulseCellHeight: CGFloat = 56
+    /// Trigger buttons + wheel notches fit one row; the remaining button
+    /// clicks wrap onto the next.
+    private static let impulseRowCapacity = 4
     private static let gridPadding: CGFloat = 8
 
     private var window: NSWindow!
@@ -33,14 +70,30 @@ final class PresetGesturePickerPanel: NSObject, NSWindowDelegate {
     /// Show the grid modally. Returns the preset the user clicked; `nil` when the
     /// dialog was closed or cancelled. A gesture drawn on the live overlay saves
     /// itself, so the caller only has to tell "drew one" apart from "cancelled".
-    static func pick() -> (name: String, stroke: Stroke)? {
-        let panel = PresetGesturePickerPanel()
+    /// - Parameter triggerButtonNumber: CG number of the current gesture trigger
+    ///   button; the matching "… Button" gesture tile is excluded entirely,
+    ///   because the trigger press itself can never be the fired input.
+    static func pick(triggerButtonNumber: Int) -> (name: String, stroke: Stroke?, impulse: ImpulseGesture?)? {
+        let panel = PresetGesturePickerPanel(triggerButtonNumber: triggerButtonNumber)
         guard let choice = panel.run() else { return nil }
-        return (choice.name, choice.stroke)
+        return (choice.name, choice.stroke, choice.impulse)
+    }
+
+    private let triggerButtonNumber: Int
+
+    init(triggerButtonNumber: Int = 1) {
+        self.triggerButtonNumber = triggerButtonNumber
     }
 
     private func run() -> Choice? {
-        window = makeWindow(entries: GestureTemplateProvider.shared.presetPickerEntries)
+        var entries = GestureTemplateProvider.shared.presetPickerEntries.map {
+            Entry(name: $0.name, stroke: $0.stroke)
+        }
+        // 触发键自己的格子直接不进面板：隐藏而不是禁用（禁用会留下空位）。
+        entries += ImpulseGesture.allCases
+            .filter { $0.cgButtonNumber != triggerButtonNumber }
+            .map { Entry(impulse: $0) }
+        window = makeWindow(entries: entries)
 
         // The overlay saves a drawn gesture itself and posts this; close so the
         // caller can tell "drew one" apart from "cancelled".
@@ -58,15 +111,27 @@ final class PresetGesturePickerPanel: NSObject, NSWindowDelegate {
         // A cell hovered when the dialog closed would otherwise keep replaying.
         cells.forEach { $0.stopReplay() }
         window.orderOut(nil)
+        window = nil
+        cells = []
         return choice
     }
 
     // MARK: Window
 
-    func makeWindow(entries: [(name: String, stroke: Stroke)]) -> NSWindow {
-        let rows = (entries.count + Self.columns - 1) / Self.columns
+    func makeWindow(entries: [Entry]) -> NSWindow {
+        // The mouse inputs get one dedicated row at the bottom, separate from
+        // the square stroke grid above, so they are never split across two
+        // partial rows.
+        let drawnEntries = entries.filter { $0.impulse == nil }
+        let impulseEntries = entries.filter { $0.impulse != nil }
+        let drawnRows = (drawnEntries.count + Self.columns - 1) / Self.columns
         let gridWidth = Self.cellSide * CGFloat(Self.columns) + Self.gridPadding * 2
-        let gridHeight = Self.cellSide * CGFloat(rows) + Self.gridPadding * 2
+        var gridHeight = Self.cellSide * CGFloat(drawnRows) + Self.gridPadding * 2
+        if !impulseEntries.isEmpty {
+            let impulseRowCount = (impulseEntries.count + Self.impulseRowCapacity - 1)
+                / Self.impulseRowCapacity
+            gridHeight += Self.impulseCellHeight * CGFloat(impulseRowCount)
+        }
         let contentWidth = gridWidth + 20
         let hintHeight: CGFloat = 84
         let contentHeight = gridHeight + hintHeight + 46
@@ -77,6 +142,10 @@ final class PresetGesturePickerPanel: NSObject, NSWindowDelegate {
                               defer: false)
         // The close button must end the modal session, or the loop never returns.
         window.delegate = self
+        // ✕ 关闭时窗口不能被立刻释放：panel.window 强引用 + runModal 返回后还要
+        // orderOut/读 choice。默认 isReleasedWhenClosed=true 会把窗口在 close 当场
+        // 释放，panel 的强引用变成悬垂指针 —— 点 ✕ 必现 EXC_BAD_ACCESS。
+        window.isReleasedWhenClosed = false
         window.title = L("Draw Gesture!")
 
         let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
@@ -113,20 +182,45 @@ final class PresetGesturePickerPanel: NSObject, NSWindowDelegate {
         grid.layer?.borderColor = NSColor.separatorColor.cgColor
         grid.layer?.borderWidth = 1
         grid.layer?.cornerRadius = 6
-        for (index, entry) in entries.enumerated() {
+        for (index, entry) in drawnEntries.enumerated() {
             let column = index % Self.columns
             let row = index / Self.columns
-            let cell = PresetGestureCell(
-                stroke: entry.stroke,
-                title: entry.name,
-                frame: NSRect(x: Self.gridPadding + CGFloat(column) * Self.cellSide,
-                              y: Self.gridPadding + CGFloat(row) * Self.cellSide,
-                              width: Self.cellSide, height: Self.cellSide)
-            )
+            let frame = NSRect(x: Self.gridPadding + CGFloat(column) * Self.cellSide,
+                               y: Self.gridPadding + CGFloat(row) * Self.cellSide,
+                               width: Self.cellSide, height: Self.cellSide)
+            guard let stroke = entry.stroke else { continue }
+            let cell = PresetGestureCell(stroke: stroke, title: entry.name, frame: frame)
             cell.target = self
             cell.action = #selector(cellClicked(_:))
             grid.addSubview(cell)
             cells.append(cell)
+        }
+
+        if !impulseEntries.isEmpty {
+            // Impulse tiles live in their own band below the square grid: the
+            // two trigger buttons and the wheel notches fill the first row
+            // (four tiles), the remaining button clicks wrap onto the next.
+            // Cells butt against each other with no extra spacing — each tile
+            // insets itself 3pt per side, giving the same 6pt visual gap as
+            // the square grid above.
+            let rowCapacity = Self.impulseRowCapacity
+            let rows = stride(from: 0, to: impulseEntries.count, by: rowCapacity).map {
+                Array(impulseEntries[$0..<min($0 + rowCapacity, impulseEntries.count)])
+            }
+            for (rowIndex, rowEntries) in rows.enumerated() {
+                let rowY = Self.gridPadding + Self.cellSide * CGFloat(drawnRows)
+                    + Self.impulseCellHeight * CGFloat(rowIndex)
+                let cellWidth = (gridWidth - Self.gridPadding * 2) / CGFloat(rowCapacity)
+                for (column, entry) in rowEntries.enumerated() {
+                    guard let impulse = entry.impulse else { continue }
+                    let frame = NSRect(x: Self.gridPadding + CGFloat(column) * cellWidth,
+                                       y: rowY, width: cellWidth, height: Self.impulseCellHeight)
+                    let cell = ImpulseGestureCell(gesture: impulse, title: entry.name, frame: frame)
+                    cell.target = self
+                    cell.action = #selector(impulseCellClicked(_:))
+                    grid.addSubview(cell)
+                }
+            }
         }
 
         let cancel = NSButton(title: L("Cancel"), target: self, action: #selector(cancelClicked))
@@ -140,8 +234,23 @@ final class PresetGesturePickerPanel: NSObject, NSWindowDelegate {
     }
 
     @objc private func cellClicked(_ sender: PresetGestureCell) {
-        choice = Choice(name: sender.gestureName, stroke: sender.stroke)
+        choice = Choice(name: sender.gestureName, stroke: sender.stroke, impulse: nil)
         close()
+    }
+
+    @objc private func impulseCellClicked(_ sender: ImpulseGestureCell) {
+        choice = Choice(name: sender.title, stroke: nil, impulse: sender.gesture)
+        close()
+    }
+
+    /// 测试探针：构造一块 action 指向自身的格子，供禁用反馈用例观测转发。
+    static func makeDisabledFeedbackProbe() -> NSControl & ImpulseCellTestProbe {
+        let cell = ImpulseGestureCell(
+            gesture: .rightClick, title: "Right Button",
+            frame: NSRect(x: 0, y: 0, width: 120, height: 40))
+        cell.target = cell
+        cell.action = #selector(ImpulseGestureCell.probeAction)
+        return cell
     }
 
     @objc private func cancelClicked() {
@@ -254,4 +363,114 @@ private final class PresetGestureCell: NSControl {
     func stopReplay() {
         replay.stop()
     }
+}
+
+/// 只为测试暴露 private ImpulseGestureCell 的转发状态（见 ImpulseCellRenderingTests）。
+protocol ImpulseCellTestProbe: AnyObject {
+    var forwardedForTest: Bool { get set }
+}
+
+// MARK: - Impulse cell
+
+/// A picker tile for a gesture that has no trajectory to draw: a button +
+/// wheel notch, or a momentary click on the middle / side buttons. It shows a
+/// glyph and a two-line caption instead of replaying a stroke.
+private final class ImpulseGestureCell: NSControl, ImpulseCellTestProbe {
+    let gesture: ImpulseGesture
+    let title: String
+
+    init(gesture: ImpulseGesture, title: String, frame: NSRect) {
+        self.gesture = gesture
+        self.title = title
+        super.init(frame: frame)
+        toolTip = title
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(title)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var acceptsFirstResponder: Bool { false }
+
+    /// The gesture's own name; the trigger button is not part of it.
+    private var caption: String { title }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let tile = bounds.insetBy(dx: 3, dy: 3)
+        let background = NSBezierPath(roundedRect: tile, xRadius: 6, yRadius: 6)
+        background.lineWidth = 1
+        // 与字母手势格（PresetGestureCell）同款描边，两排格子边框观感一致。
+        NSColor.separatorColor.setStroke()
+        background.stroke()
+
+        // Horizontal layout: glyph on the left, label beside it on one line.
+        // The pair is centred vertically as a unit — with a wide cell there is
+        // no caption band to reserve, so stacking would leave both elements
+        // off-centre.
+        let font = NSFont.systemFont(ofSize: 11)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]
+        let textSize = (caption as NSString).size(withAttributes: attributes)
+        // The circled dot/number glyphs read larger than the wheel capsule at
+        // the same box size, so the circle ones get a smaller box; that keeps
+        // the five glyphs visually even. Spacing stays tight — 6pt between the
+        // glyph box and the label.
+        let glyphSide: CGFloat = gesture.isClickGlyph ? 21 : ImpulseGlyph.intrinsicSize.height
+        let spacing: CGFloat = 6
+        let totalWidth = glyphSide + spacing + textSize.width
+        let originX = tile.midX - totalWidth / 2
+
+        let glyphRect = NSRect(x: originX,
+                               y: tile.midY - glyphSide / 2,
+                               width: glyphSide, height: glyphSide)
+        ImpulseGlyph.draw(gesture, in: glyphRect)
+
+        // AppKit text draws from the baseline; centre the box instead. The
+        // width is the measured text size, never clipped to the leftover tile
+        // space — clipping made NSString.draw wrap and the single-line-height
+        // rect then hid the second line, showing only "Wheel" / "Middle".
+        let textRect = NSRect(x: glyphRect.maxX + spacing,
+                              y: tile.midY - textSize.height / 2,
+                              width: textSize.width + 1,
+                              height: textSize.height)
+        (caption as NSString).draw(at: textRect.origin, withAttributes: attributes)
+    }
+
+    /// Forward the click like the drawn-preset cell does. Without this the
+    /// control never calls its target, which made every tile in this row inert.
+    override func mouseDown(with event: NSEvent) {
+        guard let action else { return }
+        NSApp.sendAction(action, to: target, from: self)
+    }
+
+    // MARK: Test hooks（ImpulseGestureCell 是 private，测试经由文件底部协议访问）
+
+    @objc func probeAction() {
+        forwardedForTest = true
+    }
+
+    var forwardedForTest: Bool {
+        get { objc_getAssociatedObject(self, &Self.forwardedKey) != nil }
+        set { objc_setAssociatedObject(self, &Self.forwardedKey, newValue ? NSNumber(value: true) : nil, .OBJC_ASSOCIATION_RETAIN) }
+    }
+    private static var forwardedKey: UInt8 = 0
+
+    /// Tracking area so the tile can show a hover outline, matching the drawn
+    /// cells' affordance.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingArea?.forEach(removeTrackingArea)
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = [area]
+    }
+
+    private var trackingArea: [NSTrackingArea]?
 }

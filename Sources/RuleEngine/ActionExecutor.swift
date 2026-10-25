@@ -12,11 +12,20 @@ import AppleScriptRunner
 
 /// Executes rule actions.
 public final class ActionExecutor {
+    /// Shared so consecutive notches feed one acceleration history and one
+    /// animation stream, no matter which rule fired them.
+    static let wheelAnimator = SmoothWheelAnimator()
+
     private let appleScriptRunner: AppleScriptRunner
 
     /// 截图动作的执行入口，由 App 层挂上（Screenshot 模块在这一层之上，
     /// RuleEngine 自己够不到）。没挂上时保持沉默，不假装执行成功。
     public var onScreenshotRequested: (() -> Void)?
+
+    /// Where synthetic events are delivered. Production leaves this nil, which
+    /// posts at the session tap. Tests install a sink to inspect wheel2 / flags
+    /// without moving the real pointer or scrolling the developer's screen.
+    var eventSink: ((CGEvent, CGEventTapLocation) -> Void)?
 
     public init(appleScriptRunner: AppleScriptRunner = AppleScriptRunner()) {
         self.appleScriptRunner = appleScriptRunner
@@ -89,14 +98,81 @@ public final class ActionExecutor {
     // 若投到 .cghidEventTap，事件要先穿过我们自己那只 head-insert HID tap，而回调此刻还
     // 没返回（后面仍有读偏好与提示气泡）—— 实测回调多忙 120ms，动作就晚 120ms 落地。
     private func pressKey(keyCode: UInt16, flags: UInt) {
+        // Hot Key can also record a mouse input. Those are encoded above the
+        // keyboard range (see MouseShortcutCodec), so re-synthesise them here
+        // instead of posting a bogus virtual key code.
+        if let mouse = MouseShortcutCodec.input(forKeyCode: keyCode) {
+            postMouseShortcut(mouse, flags: flags)
+            return
+        }
         let flagMask: CGEventFlags = CGEventFlags(rawValue: UInt64(flags))
         if let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true) {
             down.flags = flagMask
-            down.post(tap: .cgSessionEventTap)
+            post(down)
         }
         if let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) {
             up.flags = flagMask
-            up.post(tap: .cgSessionEventTap)
+            post(up)
+        }
+    }
+
+
+    /// Replay a recorded mouse input at the current pointer.
+    ///
+    /// A wheel notch scrolls one line; a click posts a real down/up pair. Both
+    /// keep the recorded modifier flags so a shortcut like ⌥+middle click
+    /// behaves the way the user recorded it.
+    private func postMouseShortcut(_ input: MouseShortcut, flags: UInt) {
+        let flagMask = CGEventFlags(rawValue: UInt64(flags))
+        let location = CGEvent(source: nil)?.location ?? .zero
+
+        switch input {
+        case .wheel(let direction):
+            // Hand this to our own animator instead of Mac Mouse Fix: MMF's
+            // acceleration keys off tick frequency, and the extra hop through
+            // rule matching stretches the intervals enough that its curve
+            // stays slow. The animator emits continuous pixel events with a
+            // phase, which MMF's tap ignores by design, so the two smoothing
+            // engines cannot stack even with both apps running.
+            //
+            // The wheel rules are recorded as Shift+wheel on purpose: Shift is
+            // macOS's horizontal-scroll translation, so a Shifted action scrolls
+            // horizontally while a plain action scrolls vertically. The animator
+            // posts real wheel2 for horizontal, so no synthetic Shift is needed.
+            let axis: SmoothWheelAnimator.Axis = flagMask.contains(.maskShift)
+                ? .horizontal
+                : .vertical
+            let sign: Double
+            switch direction {
+            case .up: sign = -1
+            case .down: sign = 1
+            case .left: sign = -1
+            case .right: sign = 1
+            }
+            Self.wheelAnimator.addNotch(axis: axis, sign: sign, flags: flagMask)
+
+        case .button(let number):
+            // CG only names left/right/center; the real number travels in the
+            // payload, exactly as the replay path in CanvasManager does it.
+            guard let down = CGEvent(mouseEventSource: nil, mouseType: .otherMouseDown,
+                                     mouseCursorPosition: location, mouseButton: .center),
+                  let up = CGEvent(mouseEventSource: nil, mouseType: .otherMouseUp,
+                                   mouseCursorPosition: location, mouseButton: .center)
+            else { return }
+            down.setIntegerValueField(.mouseEventButtonNumber, value: Int64(number))
+            up.setIntegerValueField(.mouseEventButtonNumber, value: Int64(number))
+            down.flags = flagMask
+            up.flags = flagMask
+            post(down)
+            post(up)
+        }
+    }
+
+    private func post(_ event: CGEvent, at tap: CGEventTapLocation = .cgSessionEventTap) {
+        if let eventSink {
+            eventSink(event, tap)
+        } else {
+            event.post(tap: tap)
         }
     }
 

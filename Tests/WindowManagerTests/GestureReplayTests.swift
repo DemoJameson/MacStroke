@@ -49,8 +49,10 @@ final class GestureReplayTests: XCTestCase {
     }
 
     func testPickerCellsTrackTheMouse() throws {
-        let entries = GestureTemplateProvider.shared.presetPickerEntries
-        let window = PresetGesturePickerPanel().makeWindow(entries: entries)
+        let entries = GestureTemplateProvider.shared.presetPickerEntries.map {
+            PresetGesturePickerPanel.Entry(name: $0.name, stroke: $0.stroke)
+        }
+        let window = PresetGesturePickerPanel(triggerButtonNumber: 99).makeWindow(entries: entries)
         let grid = try XCTUnwrap(window.contentView?.subviews.first {
             $0.identifier?.rawValue == "PresetGestureGrid"
         })
@@ -72,10 +74,12 @@ final class GestureReplayTests: XCTestCase {
 
     /// The reason the replay exists: a twin is the same polyline walked backwards.
     func testReversedTwinsDivergeOnlyWhileDrawing() throws {
-        let entries = GestureTemplateProvider.shared.presetPickerEntries
-        let forward = try XCTUnwrap(entries.first { $0.name == "T" }).stroke
+        let entries = GestureTemplateProvider.shared.presetPickerEntries.map {
+            PresetGesturePickerPanel.Entry(name: $0.name, stroke: $0.stroke)
+        }
+        let forward = try XCTUnwrap(entries.first { $0.name == "T" }?.stroke)
             .points.map { CGPoint(x: $0.x, y: $0.y) }
-        let reversed = try XCTUnwrap(entries.first { $0.name == "T Revered" }).stroke
+        let reversed = try XCTUnwrap(entries.first { $0.name == "T Revered" }?.stroke)
             .points.map { CGPoint(x: $0.x, y: $0.y) }
         XCTAssertEqual(GestureStrokeRenderer.visiblePolyline(forward, progress: 1),
                        GestureStrokeRenderer.visiblePolyline(reversed, progress: 1).reversed())

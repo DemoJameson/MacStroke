@@ -16,7 +16,10 @@ enum GestureRecordFlow {
     /// Enter screen-recording mode for the given rule and show the original
     /// "Draw Gesture!" alert with its preset-gesture combo box
     /// (AppPrefsWindowController.m preSetRuleGestureAtIndex / alertModal…).
-    static func record(ruleName: String, store: RuleStore) {
+    /// - Parameter ruleIndex: positional index of the rule being edited. New
+    ///   rules share the "Double click Modify" placeholder name, so a name is
+    ///   not a safe address — two pending rules would target the same row.
+    static func record(ruleIndex: Int, ruleName: String, store: RuleStore) {
         NotificationCenter.default.post(
             name: .macStrokeRecordGesture,
             object: nil,
@@ -33,15 +36,51 @@ enum GestureRecordFlow {
         }
         defer { NotificationCenter.default.removeObserver(drawnObs) }
 
-        guard let preset = PresetGesturePickerPanel.pick() else {
+        let triggerButton = PreferencesStorage()
+            .getIntOptional(forKey: .gestureTriggerButton)
+            ?? StorageDefaults.gestureTriggerButton
+        guard let preset = PresetGesturePickerPanel.pick(triggerButtonNumber: triggerButton) else {
             if !drawnOnScreen {
                 NotificationCenter.default.post(name: .macStrokeCancelRecordGesture, object: nil)
             }
             return
         }
         NotificationCenter.default.post(name: .macStrokeCancelRecordGesture, object: nil)
-        guard applyPresetGesture(preset.name, toRuleNamed: ruleName, store: store) else { return }
+        let applied: Bool
+        if let impulse = preset.impulse {
+            applied = applyImpulseGesture(impulse, toRuleAt: ruleIndex, store: store)
+        } else {
+            applied = applyPresetGesture(preset.name, toRuleNamed: ruleName, store: store)
+        }
+        guard applied else { return }
         postMacStrokeNotification(L("Gesture draw complete!"))
+    }
+
+    /// Write an impulse gesture into the rule as its trigger. The action is left
+    /// alone — the user picks it in the Action column afterwards (Hot Key can
+    /// now record a wheel notch or mouse button, which is what actually runs).
+    private static func applyImpulseGesture(
+        _ impulse: ImpulseGesture, toRuleAt index: Int, store ruleStore: RuleStore
+    ) -> Bool {
+        guard ruleStore.rules.indices.contains(index) else { return false }
+        let old = ruleStore.rules[index]
+        let newRule = Rule(
+            name: old.name,
+            description: old.description,
+            template: GestureTemplate(points: [], name: old.name),
+            impulse: impulse,
+            minSimilarityScore: old.minSimilarityScore,
+            action: old.action,
+            note: old.note,
+            isEnabled: old.isEnabled,
+            triggerOnEveryMatch: old.triggerOnEveryMatch,
+            filter: old.filter,
+            filterType: old.filterType,
+            spareActions: old.spareActions
+        )
+        ruleStore.replace(at: index, with: newRule)
+        NotificationCenter.default.post(name: .macStrokeRuleStoreDidChange, object: nil)
+        return true
     }
 
     /// Map a combo title ("M", "M Revered", "┏"…) to a preset template and
@@ -68,7 +107,8 @@ enum GestureRecordFlow {
             filterType: old.filterType,
             spareActions: old.spareActions
         )
-        ruleStore.update(newRule)
+        // 规则名会从 "New Rule" 变成手势名，按新名 update 找不到旧记录 —— 必须按旧名替换。
+        ruleStore.replace(named: old.name, with: newRule)
         NotificationCenter.default.post(name: .macStrokeRuleStoreDidChange, object: nil)
         return true
     }

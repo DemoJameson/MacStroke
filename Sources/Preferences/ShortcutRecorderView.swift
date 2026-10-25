@@ -10,6 +10,7 @@
 import Foundation
 import AppKit
 import Carbon.HIToolbox
+import GestureEngine
 import EventCapture
 import Storage
 
@@ -39,8 +40,20 @@ public final class ShortcutRecorderView: NSView {
         didSet { needsDisplay = true }
     }
 
+    /// Set when this recorder may capture mouse inputs (wheel notches and
+    /// momentary middle/side clicks) in addition to the keyboard. The Hot Key
+    /// action turns it on so a rule can be bound to "middle click" or
+    /// "right + wheel up" without a second action type.
+    public var recordsMouseInput = false {
+        didSet { needsDisplay = true }
+    }
+
     /// Live modifier flags echoed while recording (SRModifierOptionView).
     private var pressedFlags: UInt = 0
+
+    /// Local monitor that swallows wheel / button events while recording, so
+    /// one click cannot both record and reach the app underneath.
+    private var mouseRecordingMonitor: Any?
 
     /// Appearance to draw with, decided by whoever hosts this view.
     ///
@@ -114,6 +127,10 @@ public final class ShortcutRecorderView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    deinit {
+        stopMouseRecording()
+    }
+
     // MARK: - Display
 
     /// Human-readable shortcut like "⌃⇧V" (mirrors ShortcutRecorder's display).
@@ -122,7 +139,25 @@ public final class ShortcutRecorderView: NSView {
     /// key of its own (⌘⇧A), so it has to be named.
     public var displayString: String {
         if modifiersOnly { return Self.modifierSymbols(flags) }
+        if let mouse = MouseShortcutCodec.input(forKeyCode: keyCode) {
+            return Self.modifierSymbols(flags) + Self.mouseName(mouse)
+        }
         return Self.modifierSymbols(flags) + Self.keyName(for: keyCode)
+    }
+
+    /// Label for a recorded mouse input ("Middle Button", "Wheel ↑").
+    static func mouseName(_ input: MouseShortcut) -> String {
+        switch input {
+        case .button(2): return L("Middle Button")
+        case .button(let number): return String(format: L("Button %d"), number)
+        case .wheel(let direction):
+            switch direction {
+            case .up: return L("Wheel ↑")
+            case .down: return L("Wheel ↓")
+            case .left: return L("Wheel ←")
+            case .right: return L("Wheel →")
+            }
+        }
     }
 
     static func modifierSymbols(_ flags: UInt) -> String {
@@ -163,7 +198,9 @@ public final class ShortcutRecorderView: NSView {
                 ? Self.modifierSymbols(pressedFlags) + "…"
                 : L(modifiersOnly
                     ? "Recording… hold modifiers (Esc to cancel)"
-                    : "Recording… press a key (Esc to cancel)")
+                    : (recordsMouseInput
+                        ? "Recording… press a key or mouse button (Esc to cancel)"
+                        : "Recording… press a key (Esc to cancel)"))
         } else if !hasRecordedValue {
             text = L("Click to Record")
         } else {
@@ -339,6 +376,7 @@ public final class ShortcutRecorderView: NSView {
             ?? UInt(NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).rawValue)
         pressedFlags = modifiersOnly ? Self.modeledFlags(current) : current
         isRecording = true
+        if recordsMouseInput, !modifiersOnly { startMouseRecording() }
     }
 
     /// Stops listening and reports the recorded shortcut.
@@ -346,6 +384,7 @@ public final class ShortcutRecorderView: NSView {
         guard isRecording else { return }
         isRecording = false
         pressedFlags = 0
+        stopMouseRecording()
         onShortcutChanged?(keyCode, flags)
     }
 
@@ -354,7 +393,58 @@ public final class ShortcutRecorderView: NSView {
         guard isRecording else { return }
         isRecording = false
         pressedFlags = 0
+        stopMouseRecording()
         needsDisplay = true
+    }
+
+    // MARK: - Mouse recording
+
+    /// Wheel notches and extra-button clicks never become `keyDown:`, so they
+    /// need a local monitor. It runs only while this recorder is armed, and it
+    /// always returns nil for the event it uses — otherwise the click would also
+    /// land in the window below and change the preference page.
+    private func startMouseRecording() {
+        stopMouseRecording()
+        mouseRecordingMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.scrollWheel, .otherMouseDown]
+        ) { [weak self] event in
+            guard let self, self.isRecording, self.recordsMouseInput else { return event }
+            if event.type == .scrollWheel {
+                // macOS swaps AND flips Shift+vertical-scroll before delivery.
+                // WheelAxisMapping is the single place that knows this; using
+                // it here keeps the recorder in step with the trigger matcher.
+                let delta = WheelDelta(
+                    x: event.scrollingDeltaX,
+                    y: event.scrollingDeltaY,
+                    shifted: event.modifierFlags.contains(.shift)
+                )
+                guard let direction = delta.direction else { return event }
+                self.recordMouse(.wheel(direction), flags: event.modifierFlags)
+                return nil
+            }
+            let number = Int(event.buttonNumber)
+            guard number >= 2 else { return event }
+            // Extra-button presses also fire otherMouseUp; recording on down and
+            // swallowing only the down leaves the up harmless.
+            self.recordMouse(.button(number), flags: event.modifierFlags)
+            return nil
+        }
+    }
+
+    private func stopMouseRecording() {
+        if let monitor = mouseRecordingMonitor {
+            NSEvent.removeMonitor(monitor)
+            mouseRecordingMonitor = nil
+        }
+    }
+
+    /// Commit a mouse input the same way a key press commits, including the
+    /// modifier bits held with it.
+    private func recordMouse(_ input: MouseShortcut, flags eventFlags: NSEvent.ModifierFlags) {
+        let held = UInt(eventFlags.intersection(.deviceIndependentFlagsMask).rawValue)
+        keyCode = MouseShortcutCodec.code(for: input)
+        flags = Self.modeledFlags(held)
+        stopRecording()
     }
 
     // MARK: - Key naming
