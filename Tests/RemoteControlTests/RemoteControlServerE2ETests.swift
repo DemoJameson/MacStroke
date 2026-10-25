@@ -233,7 +233,8 @@ final class RemoteControlServerE2ETests: XCTestCase {
             "帧里的字节解不出图像，手机端只会看到一个灰块")
         let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(decoded, 0, nil)
                                        as? [CFString: Any])
-        XCTAssertNotNil(properties[kCGImagePropertyWidth], "JPEG 里没有尺寸信息")
+        // 常量名是 PixelWidth/PixelHeight：`kCGImagePropertyWidth` 不存在，取到的永远是 nil。
+        XCTAssertNotNil(properties[kCGImagePropertyPixelWidth], "JPEG 里没有尺寸信息")
     }
 
     /// 没有屏幕录制权限时，服务端要把话说明白并且一个字节画面都不推。
