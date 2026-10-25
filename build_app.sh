@@ -209,6 +209,14 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- TAL（Automatic Termination）兜底：即使 delegate 拦下了「关闭最后窗口即退出」，
+         LaunchServices 仍会在 accessory 应用无可见窗口一段时间后主动发 Quit AppleEvent
+         （日志实证：Handling Quit AppleEvent → terminate:）。状态栏常驻应用必须显式关闭
+         自动终止与突然终止，退出只走菜单里的 Quit。 -->
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
     <key>NSAppleScriptEnabled</key>
     <true/>
     <key>OSAScriptingDefinition</key>

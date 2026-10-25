@@ -375,6 +375,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return false
     }
 
+    /// accessory 应用没有菜单栏，macOS 14+ 会在最后一个窗口关闭时默认退出进程 ——
+    /// 关掉「绘制手势」选择窗（或偏好窗）等于整个 MacStroke 退出，托盘图标也消失。
+    /// 状态栏常驻应用必须始终返回 false，退出只走菜单里的 Quit。
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        NSLog("%@", "[MacStroke] shouldTerminateAfterLastWindowClosed -> false (staying alive)")
+        return false
+    }
+
+    /// 只有菜单里的 Quit 会置位；此外的一切 terminate 请求（关掉最后一个窗口后
+    /// LaunchServices 下发的 Quit AppleEvent / 自动终止）都在这里被拒掉。
+    private var userInitiatedQuit = false
+
+    @objc private func quitFromMenu(_ sender: Any?) {
+        userInitiatedQuit = true
+        NSApp.terminate(self)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let reply = AppTerminatePolicy.reply(userInitiated: userInitiatedQuit)
+        if reply == .terminateCancel {
+            NSLog("%@", "[MacStroke] blocked non-user terminate request (window-close path); staying resident")
+        }
+        return reply
+    }
+
+    /// 第二层保险：任何窗口关闭后若无可见窗口，记录现场。系统确实会在某些路径
+    /// （如 modal 面板 + accessory 组合的旧版本行为）绕过上面的询问，这条日志
+    /// 能区分「delegate 没被调」和「delegate 被调但没生效」。
+
+
     // MARK: - First launch
 
     /// First launch initialization: seed the default rules and right-click
