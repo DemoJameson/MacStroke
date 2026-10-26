@@ -79,7 +79,9 @@ swift test --list-tests
   - 创建状态栏项目，使用模板图片（`menu_icon_16x16.png` / disabled 版本）
   - 初始化 Sparkle 更新器（沿用原版 appcast；Info.plist 必须带 `SUPublicEDKey`，否则 Sparkle 2 启动即弹致命错误模态框）
 
-- **Sources/EventCapture/EventCapture.swift** — 在 `.cghidEventTap` 使用 `CGEventTap` 拦截右键手势事件（rightMouseDown/Dragged/Up + leftMouseDown）。**只有右键开始手势**；delegate 返回 `true` 时事件被吞掉（返回 NULL），`false` 时放行。坐标在边界处转换为 AppKit 底左原点（`primaryScreenHeight - cgY`），与手势模板坐标系一致。`kCGEventTapDisabledByTimeout` 时自动重新启用 tap。`isEnabled` 主开关对应状态栏"Enable MacStroke"。
+- **Sources/EventCapture/EventCapture.swift** — 在 `.cghidEventTap` 使用 `CGEventTap` 拦截右键手势事件（rightMouseDown/Dragged/Up + leftMouseDown）。**只有右键开始手势**；delegate 返回 `true` 时事件被吞掉（返回 NULL），`false` 时放行。坐标在边界处转换为 AppKit 底左原点（`primaryScreenHeight - cgY`），与手势模板坐标系一致。`kCGEventTapDisabledByTimeout` 时自动重新启用 tap。`isEnabled` 主开关对应状态栏"Enable MacStroke"。滚轮事件（`scrollWheel`）也走这条 tap，`ScrollEvent.location` 同样翻成 AppKit 坐标 —— 瞬时手势要靠它判定「这一发滚轮落在指针下哪扇窗」。
+- **Sources/EventCapture/CursorWindowProbe.swift** — 「光标下那扇窗是谁」。用 `NSWindow.windowNumber(at:belowWindowWithWindowNumber:)` 做真实命中测试（与 Mac Mouse Fix 同一原语，只要辅助功能授权），再按窗口号查 `CGWindowListCopyWindowInfo(.optionIncludingWindow)` 取 pid/bundleID/层级/透明度。门槛：跳过自家窗 → 层 0 → 有 bundleID。**不要**改成「全屏枚举再自己筛」：那条路的产出随授权而变（无「屏幕录制」时 `kCGWindowName` 被抹掉，受限/沙箱进程甚至一条都拿不到），而单窗查询只读 ownerPID/ownerName/layer/alpha，不碰需要屏幕录制的字段。画布在 `CGShieldingWindowLevel()` 且 `ignoresMouseEvents = true`，命中测试会直接穿透它（实测有/无遮罩结果一致）。
+- **Sources/RuleEngine/PointerRouting.swift** — `RuleAction.routesByPointerWindow`：滚轮/中键侧键回放、坐标点击按指针落点落地（→ true）；键盘/文本/密码/AppleScript 只进活跃 App（→ false）。`RuleStore.match(impulse:pointerBundleID:frontBundleID:)` 先用它筛指针那家的规则，再退回前台；指针那家被黑白名单排除时，只有挑中的是「按指针落地」的动作才返回 nil（键盘动作打的是前台，不受指针那扇窗的名单影响）。
 
 - **Sources/GestureEngine/** — 从原始 `GestureCompare.m` 移植的 DTW 算法：
   - `Stroke` / `GesturePoint` — 归一化坐标、`t`（时间）、`alpha`（角度）、`dt`

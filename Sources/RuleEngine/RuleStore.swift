@@ -141,10 +141,76 @@ public final class RuleStore: ObservableObject {
     /// 滚轮刻度是高频路径，这里直接遍历本 store 的规则，复用 RuleEngine 的
     /// filter 语义，不再每次调用都全量复制规则建引擎。
     public func match(impulse: ImpulseGesture, bundleID: String) -> Rule? {
-        guard BlackWhiteFilter.shared.shouldHookMouseEventForApp(bundleID) else { return nil }
+        guard isAppAllowed(bundleID) else { return nil }
         return rules.first {
             $0.isEnabled && $0.impulse == impulse
                 && engineStub.matchesFilter(filter: $0.filter, type: $0.filterType, bundleID: bundleID)
+        }
+    }
+
+    /// 黑白名单判据。默认就是 App 共享的那一份；留成属性是为了让「指针那家被排除时
+    /// 不许拿前台规则往它身上投」这条能在单测里钉住，而不去动真实的用户名单。
+    public var isAppAllowed: (String) -> Bool = {
+        BlackWhiteFilter.shared.shouldHookMouseEventForApp($0)
+    }
+
+    /// 这一家有没有「按指针落地」的瞬时手势规则（滚轮 / 中键 / 侧键回放）。
+    ///
+    /// 用来决定「指针停在这扇后台窗上时，要不要为它开一次手势窗口」。门槛与真正匹配时
+    /// 一致，所以不会出现「窗口开了、滚轮却一条都匹配不上」的空转：
+    /// - 只配了轨迹规则的后台窗不开（轨迹动作仍按前台匹配）；
+    /// - 只有键盘动作的也不开（键只进活跃 App，见 `RuleAction.routesByPointerWindow`）。
+    public func hasPointerRoutedImpulseRule(bundleID: String) -> Bool {
+        guard isAppAllowed(bundleID) else { return false }
+        return rules.contains {
+            $0.isEnabled && $0.impulse != nil && $0.action.routesByPointerWindow
+                && engineStub.matchesFilter(filter: $0.filter, type: $0.filterType, bundleID: bundleID)
+        }
+    }
+
+    /// 匹配一次瞬时手势，同时拿到「指针下那家」和「前台那家」。
+    ///
+    /// 指针停在后台窗口上滚轮时，用户要滚的是那扇窗；可键盘动作只进活跃 App。
+    /// 所以先按指针下那家找，只有「按指针落地」的动作才采纳它（见
+    /// `RuleAction.routesByPointerWindow`），否则退回前台那家 —— 与改动前同一口径。
+    /// 指针下没有可归属的窗口时也退回前台。
+    public func match(impulse: ImpulseGesture,
+                      pointerBundleID: String?,
+                      frontBundleID: String) -> Rule? {
+        let pointerIsFront = pointerBundleID == nil || pointerBundleID == frontBundleID
+        if !pointerIsFront, let pointerBundleID, isAppAllowed(pointerBundleID),
+           let pointerRule = firstImpulseRule(gesture: impulse, bundleID: pointerBundleID,
+                                              where: { $0.action.routesByPointerWindow }) {
+            return pointerRule
+        }
+
+        guard let frontRule = match(impulse: impulse, bundleID: frontBundleID) else { return nil }
+        // 指针停在一家被黑白名单排除的 App 上、而挑中的又是「按指针落地」的动作：
+        // 这一下谁都不动。投出去等于往用户明确排除的家里塞事件，与黑名单语义相反；
+        // 返回 nil 让调用方放行原始滚轮，那扇窗照系统行为自己滚。
+        //
+        // 只否这一档。键盘动作打的是前台，与指针下那扇窗无关 —— 因为指针恰好停在一个
+        // 被排除的 App 上就把「按住触发键切标签页」整发吞掉，是另一回事（那是失灵，不是保护）。
+        if !pointerIsFront, let pointerBundleID, !isAppAllowed(pointerBundleID),
+           frontRule.action.routesByPointerWindow {
+            return nil
+        }
+        return frontRule
+    }
+
+    /// 在这一家的规则里找第一条满足 `where` 的瞬时手势。
+    ///
+    /// 与 `match(impulse:bundleID:)` 的差别只有一处：可以先按动作筛。指针那一路要用它 ——
+    /// 一条 `*` 的全局键盘规则（比如「按住右键滚 = 切标签页」）也匹配所有 bundle，
+    /// 先按文件名顺序撞上它就会把指针下那家真正想要的滚轮动作顶掉。键盘动作本来也进不了
+    /// 后台窗口，筛掉它既不改老语义，也让「App 专用规则」不必靠 rules.json 的行序取胜。
+    private func firstImpulseRule(gesture: ImpulseGesture, bundleID: String,
+                                  where predicate: (Rule) -> Bool) -> Rule? {
+        guard isAppAllowed(bundleID) else { return nil }
+        return rules.first {
+            $0.isEnabled && $0.impulse == gesture
+                && engineStub.matchesFilter(filter: $0.filter, type: $0.filterType, bundleID: bundleID)
+                && predicate($0)
         }
     }
 

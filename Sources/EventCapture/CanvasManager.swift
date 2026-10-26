@@ -53,6 +53,17 @@ public class CanvasManager: EventCaptureDelegate {
     /// `!shouldHookMouseEventForApp(frontBundle) || !(showUIInWhateverApp || appSuitedRule)` gate).
     public var shouldCaptureGesture: ((String) -> Bool)?
 
+    /// App-layer filter for the window under the pointer, asked only when the
+    /// frontmost app failed `shouldCaptureGesture`.
+    ///
+    /// A wheel gesture belongs to the window under the pointer, so a background
+    /// app with its own wheel rules has to be able to start the gesture even
+    /// when the frontmost app has none. Deliberately narrower than the front
+    /// gate: the app layer answers "this app has an impulse rule whose action
+    /// lands where the pointer is", so a background app that only has stroke
+    /// rules — or only keyboard actions — never causes a canvas to appear.
+    public var shouldCapturePointerGesture: ((String) -> Bool)?
+
     /// Whether the given app should get its native right-click menu forwarded
     /// when a click (no drag) doesn't match any gesture (RightClicksList check).
     public var needsRightClickMenu: ((String) -> Bool)?
@@ -90,12 +101,41 @@ public class CanvasManager: EventCaptureDelegate {
     /// branch can only be verified by moving the real pointer.
     var syntheticEventSink: ((CGEvent, CGEventTapLocation) -> Void)?
 
+    /// Where an impulse gesture points.
+    ///
+    /// A wheel notch belongs to the window under the pointer, not to whichever
+    /// app happens to be frontmost: macOS itself delivers a real scroll to the
+    /// window the pointer hovers, even when that app is in the background.
+    /// A click impulse is the same story (the click lands where the pointer
+    /// is), but a *keyboard* action always lands in the active app, so the two
+    /// bundle IDs have to travel together and the app layer picks per gesture.
+    public struct ImpulseTarget: Equatable {
+        /// Bundle of the ordinary window under the pointer, when one could be
+        /// resolved. `nil` means the pointer sits on one of our own windows, on
+        /// a non-ordinary layer, or on no window at all.
+        public let pointerBundleID: String?
+        /// The app that was frontmost when the trigger button went down.
+        public let frontBundleID: String
+
+        public init(pointerBundleID: String?, frontBundleID: String) {
+            self.pointerBundleID = pointerBundleID
+            self.frontBundleID = frontBundleID
+        }
+    }
+
     /// Runs a matched impulse gesture and reports whether it was handled.
     /// The app layer owns this: it looks the gesture up in the rule store and
     /// executes the action, so RuleEngine stays out of EventCapture. Unset
     /// means no impulse rule can match, which leaves the plain wheel/click
     /// behaviour of the trigger button untouched.
-    public var impulseHandler: ((ImpulseGesture, String) -> Bool)?
+    public var impulseHandler: ((ImpulseGesture, ImpulseTarget) -> Bool)?
+
+    /// Resolves the ordinary window under a point given in AppKit global
+    /// coordinates (the same space `MouseEvent.point` uses). The app layer
+    /// installs the real probe; leaving it unset means "no pointer target",
+    /// which falls back to the frontmost app — the pre-existing behaviour and
+    /// everything the unit tests see by default.
+    public var cursorWindowResolver: ((CGPoint) -> CursorWindowRecord?)?
 
     /// Ignore gesture starts for a moment, while preferences are waiting for
     /// the user to press the button they want to bind. Deliberately separate
@@ -147,6 +187,12 @@ public class CanvasManager: EventCaptureDelegate {
     /// change NSWorkspace.frontmostApplication, and re-reading it would make
     /// the second wheel notch target MacStroke itself instead of the user app.
     private var capturedBundleID: String?
+    /// 这一笔是「靠指针下那家」才起的手（前台那家没过闸）。
+    ///
+    /// 那种情况下前台可能压根不该被本功能碰（黑名单，或没配任何规则）。所以抬手时
+    /// 不做轨迹匹配、也不问右键菜单转发，只把这一下原样交回去 —— 与改动前
+    /// 「连画布都不开、右键直接穿过去」是同一个效果。滚轮仍按指针那家匹配。
+    private var admittedByPointerApp = false
     /// True once an impulse fired during this trigger press. The press then
     /// belongs to the scroll/click, not the gesture, so releasing the trigger
     /// must not replay it (a synthetic right-click would pop the context menu
@@ -278,7 +324,9 @@ public class CanvasManager: EventCaptureDelegate {
         case 4: gesture = .button5
         default: return false
         }
-        guard let handled = runImpulse(gesture), handled else { return false }
+        let point = CGPoint(x: event.point.x, y: event.point.y)
+        guard let handled = runImpulse(gesture, pointerBundleID: pointerBundle(at: point)),
+              handled else { return false }
         consumedImpulseButtons.insert(number)
         return true
     }
@@ -311,7 +359,10 @@ public class CanvasManager: EventCaptureDelegate {
         guard abs(steps) >= 1 else { return false }
         // Positive physical delta = rolled toward the user (down).
         let gesture: ImpulseGesture = steps > 0 ? .wheelDown : .wheelUp
-        guard let handled = runImpulse(gesture), handled else {
+        // 指针可能在这段按住期间挪过：滚轮归的是**这一发滚轮落点**下那扇窗，
+        // 不是按下触发键那一刻的那扇。事件没带坐标时就没有指针目标，交给 App 层退回前台。
+        guard let handled = runImpulse(gesture, pointerBundleID: pointerBundle(at: event.location)),
+              handled else {
             // Nothing matched: hand the movement back rather than eating it,
             // but drop the accumulation so the front app gets the raw event.
             wheelAccumulatorY = 0
@@ -320,11 +371,19 @@ public class CanvasManager: EventCaptureDelegate {
         return true
     }
 
-    /// Ask the app layer to run the impulse for the front app.
-    private func runImpulse(_ gesture: ImpulseGesture) -> Bool? {
+    /// 这一点落在谁家。探针没接线（单测的默认态）或事件没带坐标时返回 nil ——
+    /// 那就是「没有指针目标」，由 App 层退回前台那家，与改动前同一口径。
+    private func pointerBundle(at point: CGPoint?) -> String? {
+        guard let cursorWindowResolver, let point else { return nil }
+        return cursorWindowResolver(point)?.bundleID
+    }
+
+    /// Ask the app layer to run the impulse, handing over both candidate apps.
+    private func runImpulse(_ gesture: ImpulseGesture, pointerBundleID: String?) -> Bool? {
         guard let impulseHandler else { return nil }
-        let bundleID = capturedBundleID ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
-        guard impulseHandler(gesture, bundleID) else { return nil }
+        let front = capturedBundleID ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        let target = ImpulseTarget(pointerBundleID: pointerBundleID, frontBundleID: front)
+        guard impulseHandler(gesture, target) else { return nil }
         didFireImpulse = true
         return true
     }
@@ -363,21 +422,38 @@ public class CanvasManager: EventCaptureDelegate {
         }
 
         let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        let point = CGPoint(x: event.point.x, y: event.point.y)
 
         // Filter gate: black/white list + "show UI in whatever app" / suited rule.
-        if let shouldCapture = shouldCaptureGesture, !shouldCapture(frontBundle) {
-            shouldShow = false
-            return false
+        //
+        // 前台那家没过时，再问指针下那家：滚轮落在指针那扇窗上，前台恰好是个
+        // 没有规则的 App 时，手势也得能起手。只在前台没过时才去命中测试 ——
+        // 右键按下是响应死线，绝大多数点击走的是「前台就够格」那条快路。
+        var admittedByPointer = false
+        if let shouldCapture = shouldCaptureGesture {
+            var passes = shouldCapture(frontBundle)
+            if !passes, let pointerWindow = cursorWindowResolver?(point),
+               pointerWindow.bundleID != frontBundle {
+                passes = shouldCapturePointerGesture?(pointerWindow.bundleID) ?? false
+                admittedByPointer = passes
+            }
+            if !passes {
+                shouldShow = false
+                return false
+            }
+        }
+
+        // If a previous gesture was interrupted (down without up, e.g. the tap
+        // was disabled by timeout), finish it off so the app sees its click.
+        // 必须在写这一笔的状态之前做：`finishInterruptedGesture` 会 `resetGestureState()`，
+        // 把归属和「靠指针起手」一起清掉 —— 先写后清，这一笔就丢了归属。
+        if isCapturing {
+            finishInterruptedGesture()
         }
 
         shouldShow = true
         capturedBundleID = frontBundle
-
-        // If a previous gesture was interrupted (down without up, e.g. the tap
-        // was disabled by timeout), finish it off so the app sees its click.
-        if isCapturing {
-            finishInterruptedGesture()
-        }
+        admittedByPointerApp = admittedByPointer
 
         currentPoints = [event.point]
         lastDragPoint = event.point
@@ -404,7 +480,8 @@ public class CanvasManager: EventCaptureDelegate {
             isRecordingGesture = false
             onGestureRecorded?(currentPoints)
             consumed = true
-        } else if currentPoints.count >= minimumPointsForGesture,
+        } else if !admittedByPointerApp,
+                  currentPoints.count >= minimumPointsForGesture,
                   let stroke = completedStroke(),
                   let delegate = delegate,
                   delegate.canvasManager(self, didCompleteStroke: stroke, bundleID: frontBundle) {
@@ -428,7 +505,7 @@ public class CanvasManager: EventCaptureDelegate {
             // No gesture matched: give the click back to the app so the button
             // still does whatever it normally does.
             let trigger = activeTrigger ?? .right
-            if trigger == .right,
+            if trigger == .right, !admittedByPointerApp,
                let needsRightClickMenu = needsRightClickMenu,
                needsRightClickMenu(frontBundle), !hasDragged {
                 // Apps like JetBrains IDEs: synthesize Ctrl+left-click so the
@@ -481,6 +558,7 @@ public class CanvasManager: EventCaptureDelegate {
         downLocation = nil
         shouldShow = false
         capturedBundleID = nil
+        admittedByPointerApp = false
         didFireImpulse = false
         consumedImpulseButtons.removeAll()
         wheelAccumulatorY = 0

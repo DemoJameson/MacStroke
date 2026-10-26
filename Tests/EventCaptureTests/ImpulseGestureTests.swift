@@ -27,7 +27,7 @@ final class ImpulseGestureTests: XCTestCase {
     private lazy var capture = EventCapture()
 
     private var fired: [ImpulseGesture] = []
-    private var firedBundleIDs: [String] = []
+    private var firedTargets: [CanvasManager.ImpulseTarget] = []
     private var handled: Set<ImpulseGesture> = []
     private var replayed: [CGEventType] = []
 
@@ -36,12 +36,12 @@ final class ImpulseGestureTests: XCTestCase {
         manager.delegate = delegate
         capture.delegate = manager
         fired = []
-        firedBundleIDs = []
+        firedTargets = []
         handled = []
         replayed = []
-        manager.impulseHandler = { [weak self] gesture, bundleID in
+        manager.impulseHandler = { [weak self] gesture, target in
             self?.fired.append(gesture)
-            self?.firedBundleIDs.append(bundleID)
+            self?.firedTargets.append(target)
             return self?.handled.contains(gesture) ?? false
         }
         manager.syntheticEventSink = { [weak self] event, _ in
@@ -106,16 +106,18 @@ final class ImpulseGestureTests: XCTestCase {
         XCTAssertEqual(fired, [.wheelUp, .wheelUp, .wheelUp], "连滚三格应触发三次")
     }
 
-    func testAllNotchesUseTheBundleCapturedAtTriggerDown() {
+    func testAllNotchesUseTheFrontAppCapturedAtTriggerDown() {
         handled = [.wheelDown]
         holdTrigger()
         XCTAssertTrue(scroll(dy: 1))
         XCTAssertTrue(scroll(dy: 1))
         XCTAssertTrue(scroll(dy: 1))
         XCTAssertEqual(fired, [.wheelDown, .wheelDown, .wheelDown])
-        XCTAssertEqual(firedBundleIDs.count, 3)
-        XCTAssertEqual(Set(firedBundleIDs).count, 1,
-                       "all notches in one held gesture must target the app that was frontmost at mouse-down")
+        XCTAssertEqual(firedTargets.count, 3)
+        XCTAssertEqual(Set(firedTargets.map(\.frontBundleID)).count, 1,
+                       "all notches in one held gesture must keep the front app captured at mouse-down")
+        XCTAssertTrue(firedTargets.allSatisfy { $0.pointerBundleID == nil },
+                      "no pointer probe installed: nothing to attribute to the window under the pointer")
     }
 
     func testHighResolutionWheelAccumulatesToWholeLines() {
@@ -142,6 +144,70 @@ final class ImpulseGestureTests: XCTestCase {
 
         XCTAssertFalse(scroll(dy: 10, momentum: true), "惯性事件不能触发，也不能被吞")
         XCTAssertTrue(fired.isEmpty)
+    }
+
+    // MARK: - Pointer attribution
+
+    private func pointerRecord(_ bundle: String, pid: pid_t = 900) -> CursorWindowRecord {
+        CursorWindowRecord(windowNumber: 12, pid: pid, bundleID: bundle, ownerName: "Owner",
+                           layer: 0, alpha: 1)
+    }
+
+    func testWheelUsesTheAppUnderThePointer() {
+        manager.cursorWindowResolver = { [weak self] _ in self?.pointerRecord("tv.rexnow.app") }
+        handled = [.wheelUp]
+        holdTrigger()
+
+        // 真实滚轮事件自带坐标；这里给一个落点，模拟指针停在后台那扇窗上。
+        XCTAssertTrue(manager.eventCapture(capture, didReceiveScroll: ScrollEvent(
+            deltaX: 0, deltaY: -1, isContinuous: false, isMomentum: false,
+            location: CGPoint(x: 640, y: 400))))
+        XCTAssertEqual(firedTargets.last?.pointerBundleID, "tv.rexnow.app",
+                       "滚轮要归给指针下那一家，规则才挑得中它的专用动作")
+    }
+
+    func testWheelPrefersTheScrollLocationOverTriggerDown() {
+        manager.cursorWindowResolver = { point in
+            point.x < 50 ? self.pointerRecord("com.example.Start")
+                         : self.pointerRecord("com.example.Moved")
+        }
+        handled = [.wheelDown]
+        holdTrigger()
+
+        XCTAssertTrue(manager.eventCapture(capture, didReceiveScroll: ScrollEvent(
+            deltaX: 0, deltaY: 1, isContinuous: false, isMomentum: false,
+            location: CGPoint(x: 300, y: 200))))
+        XCTAssertEqual(firedTargets.last?.pointerBundleID, "com.example.Moved",
+                       "按住期间指针挪过，滚轮归的是这一发滚轮的落点")
+    }
+
+    /// 事件没带位置（手搓的事件、或系统不给坐标）时没有指针目标，交给 App 层退回前台那家。
+    /// 不能拿「按下触发键那一刻」那扇窗来冒充：指针在这期间可能已经挪走了。
+    func testWheelWithoutLocationHasNoPointerTarget() {
+        manager.cursorWindowResolver = { _ in self.pointerRecord("com.example.Start") }
+        handled = [.wheelDown]
+        holdTrigger()
+
+        XCTAssertTrue(scroll(dy: 1))
+        XCTAssertNil(firedTargets.last?.pointerBundleID)
+        XCTAssertNotNil(firedTargets.last?.frontBundleID)
+    }
+
+    func testClickImpulseUsesTheAppUnderThePointerAtTriggerDown() {
+        manager.cursorWindowResolver = { _ in self.pointerRecord("com.example.Start") }
+        handled = [.middleClick]
+        holdTrigger()
+
+        XCTAssertTrue(click(.middle, phase: .down))
+        XCTAssertEqual(firedTargets.last?.pointerBundleID, "com.example.Start")
+    }
+
+    func testNoPointerWindowFallsBackToFrontApp() {
+        handled = [.wheelUp]
+        holdTrigger()
+        XCTAssertTrue(scroll(dy: -1))
+        XCTAssertNil(firedTargets.last?.pointerBundleID)
+        XCTAssertNotNil(firedTargets.last)
     }
 
     // MARK: - Click impulses

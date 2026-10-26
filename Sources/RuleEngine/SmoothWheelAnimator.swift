@@ -566,6 +566,9 @@ final class SmoothWheelAnimator {
 
         event.flags = flags
         event.setIntegerValueField(.eventSourceUserData, value: InjectedEvent.tag)
+        // 落点保持「当前指针」：滚动按指针底下的窗口路由，事件里的 location 只填字段、
+        // 不决定路由（同 ScreenshotScrollCapture 那条注释）。所以「指针停在后台窗口上滚」
+        // 天然落到那扇窗，不需要也不该把坐标钉到别处。
         event.location = CGEvent(source: nil)?.location ?? event.location
         let timestamp = event.timestamp
         if let eventSink { eventSink(event, .cgSessionEventTap) } else { event.post(tap: .cgSessionEventTap) }

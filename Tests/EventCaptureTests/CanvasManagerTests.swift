@@ -124,6 +124,90 @@ final class CanvasManagerTests: XCTestCase {
         XCTAssertFalse(manager.capturing)
     }
 
+    /// 指针停在一扇有规则的窗口上、前台恰好是另一个没规则的 App：手势照样要能起手，
+    /// 否则真实滚轮已经在滚指针下那扇窗，我们却连窗口都不开。
+    func testCaptureStartsWhenOnlyThePointerAppHasImpulseRules() {
+        // 指针那家用一个真实世界里不存在的 bundle id：门闸读的是活的
+        // `NSWorkspace.frontmostApplication`，若它恰好等于指针那家，这条分支会被跳过，
+        // 用例就会随当时谁在前台随机红/绿。
+        manager.shouldCaptureGesture = { $0 == "test.front.only" }
+        manager.shouldCapturePointerGesture = { $0 == "test.pointer.only" }
+        manager.cursorWindowResolver = { _ in
+            CursorWindowRecord(windowNumber: 7, pid: 900, bundleID: "test.pointer.only",
+                               ownerName: "Pointer", layer: 0, alpha: 1)
+        }
+
+        let start = MouseEvent(
+            point: GesturePoint(x: 10, y: 10),
+            button: .right,
+            phase: .down
+        )
+        XCTAssertTrue(manager.eventCapture(capture, didReceive: start))
+        XCTAssertTrue(manager.capturing)
+    }
+
+    /// 靠指针那家起的手，抬手时不能拿前台那家去做轨迹匹配：前台可能压根不该被本功能碰
+    /// （黑名单，或没配任何规则），把轨迹投给它是「往用户排除的家里塞动作」。
+    func testPointerAdmittedGestureDoesNotMatchStrokesAgainstTheFrontApp() {
+        manager.shouldCaptureGesture = { _ in false }
+        manager.shouldCapturePointerGesture = { $0 == "test.pointer.only" }
+        manager.cursorWindowResolver = { _ in
+            CursorWindowRecord(windowNumber: 7, pid: 900, bundleID: "test.pointer.only",
+                               ownerName: "Pointer", layer: 0, alpha: 1)
+        }
+        delegate.matchResult = true   // 前台那家若被问，就会「命中」并把轨迹记下来
+
+        manager.eventCapture(capture, didReceive: MouseEvent(
+            point: GesturePoint(x: 0, y: 0), button: .right, phase: .down))
+        for i in 1..<20 {
+            manager.eventCapture(capture, didReceive: MouseEvent(
+                point: GesturePoint(x: Double(i), y: Double(i)), button: .right, phase: .moved))
+        }
+        manager.eventCapture(capture, didReceive: MouseEvent(
+            point: GesturePoint(x: 20, y: 20), button: .right, phase: .up))
+
+        XCTAssertTrue(delegate.completedStrokes.isEmpty,
+                      "靠指针起手的那一笔不许拿前台那家做轨迹匹配")
+    }
+
+    /// 同一笔里，右键菜单转发也不该问前台那家（JetBrains 那种 Ctrl+左键合成点击会打到错的地方）。
+    func testPointerAdmittedClickSkipsTheSyntheticContextMenu() {
+        manager.shouldCaptureGesture = { _ in false }
+        manager.shouldCapturePointerGesture = { $0 == "test.pointer.only" }
+        manager.cursorWindowResolver = { _ in
+            CursorWindowRecord(windowNumber: 7, pid: 900, bundleID: "test.pointer.only",
+                               ownerName: "Pointer", layer: 0, alpha: 1)
+        }
+        manager.needsRightClickMenu = { _ in true }   // 前台那家若被问，就会合成 Ctrl+左键
+        var replayed: [CGEventType] = []
+        manager.syntheticEventSink = { event, _ in replayed.append(event.type) }
+
+        manager.eventCapture(capture, didReceive: MouseEvent(
+            point: GesturePoint(x: 10, y: 10), button: .right, phase: .down))
+        manager.eventCapture(capture, didReceive: MouseEvent(
+            point: GesturePoint(x: 10, y: 10), button: .right, phase: .up))
+
+        XCTAssertEqual(replayed, [.rightMouseDown, .rightMouseUp],
+                       "靠指针起手的那一下要原样交回右键，不许合成 Ctrl+左键")
+    }
+
+    func testCaptureFilterStillBlocksWhenNeitherAppPasses() {
+        manager.shouldCaptureGesture = { _ in false }
+        manager.shouldCapturePointerGesture = { _ in false }
+        manager.cursorWindowResolver = { _ in
+            CursorWindowRecord(windowNumber: 7, pid: 900, bundleID: "test.pointer.only",
+                               ownerName: "Pointer", layer: 0, alpha: 1)
+        }
+
+        let start = MouseEvent(
+            point: GesturePoint(x: 10, y: 10),
+            button: .right,
+            phase: .down
+        )
+        XCTAssertFalse(manager.eventCapture(capture, didReceive: start))
+        XCTAssertFalse(manager.capturing)
+    }
+
     func testCaptureFilterBlocksGestureStart() {
         manager.shouldCaptureGesture = { _ in false }
 

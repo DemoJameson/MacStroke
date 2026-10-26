@@ -170,15 +170,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 ?? StorageDefaults.swallowUnmatchedGesture
         }
 
+        // 光标下那扇窗是谁：滚轮和点击都落在它身上，不是落在前台那一家。
+        // 系统自己就是这么派发真实滚轮的（Scroll inactive windows），我们只是跟着走。
+        canvas.cursorWindowResolver = { point in
+            CursorWindowProbe.target(at: point)
+        }
+
+        // 前台那家没有可用规则、但指针下那家配了「按指针落地」的瞬时手势时，也要让手势起手。
+        // 只认这类规则：只配了轨迹规则或键盘动作的后台窗不开窗口。
+        canvas.shouldCapturePointerGesture = { [weak self] bundleID in
+            self?.ruleStore?.hasPointerRoutedImpulseRule(bundleID: bundleID) ?? false
+        }
+
         // 瞬时手势（按住触发键时滚轮 / 中键 / 侧键）。每次现读规则，所以新加的规则
         // 立刻生效，不用重启。没有匹配的规则时返回 false，事件原样交回前台应用，
         // 中键粘贴、侧键前进后退、普通滚动都不受影响。
-        canvas.impulseHandler = { [weak self] gesture, bundleID in
-            guard let self = self, let ruleStore = self.ruleStore,
-                  let rule = ruleStore.match(impulse: gesture, bundleID: bundleID) else {
+        //
+        // 匹配用**指针下那一家**：用户把指针停在后台窗口上滚，要滚的是那扇窗。
+        // 按前台匹配的话，前台恰好是另一家时，要么挑错规则、要么一条都不中；
+        // 后台那扇窗的专用规则（比如某个 App 的 Shift+滚轮横向滚动）永远轮不到。
+        canvas.impulseHandler = { [weak self] gesture, target in
+            guard let self = self, let ruleStore = self.ruleStore else { return false }
+            guard let rule = ruleStore.match(impulse: gesture,
+                                             pointerBundleID: target.pointerBundleID,
+                                             frontBundleID: target.frontBundleID) else {
                 return false
             }
-            NSLog("%@", "[AppDelegate] Impulse matched: \(rule.name) (\(gesture.rawValue))")
+            NSLog("%@", "[AppDelegate] Impulse matched: \(rule.name) (\(gesture.rawValue)，"
+                + "指针下 \(target.pointerBundleID ?? "无")，前台 \(target.frontBundleID))")
             self.performRule(rule)
             return true
         }

@@ -135,14 +135,25 @@ public struct ScrollEvent {
     public let isMomentum: Bool
     /// The modifier keys held when the event was captured.
     public let modifiers: Set<GestureModifier>
+    /// Where the pointer was, in AppKit global coordinates (primary screen's
+    /// bottom-left origin) — the same space `MouseEvent.point` uses, and the
+    /// space `NSWindow.windowNumber(at:)` hit-tests in.
+    ///
+    /// A real scroll is delivered to the window under the pointer, even when
+    /// that app is not frontmost; the impulse path needs the same point to ask
+    /// "which app is this notch for". `nil` in hand-built events keeps the
+    /// older "whatever the trigger captured" behaviour.
+    public let location: CGPoint?
 
     public init(deltaX: Double, deltaY: Double, isContinuous: Bool,
-                isMomentum: Bool, modifiers: Set<GestureModifier> = []) {
+                isMomentum: Bool, modifiers: Set<GestureModifier> = [],
+                location: CGPoint? = nil) {
         self.deltaX = deltaX
         self.deltaY = deltaY
         self.isContinuous = isContinuous
         self.isMomentum = isMomentum
         self.modifiers = modifiers
+        self.location = location
     }
 }
 
@@ -369,6 +380,20 @@ public class EventCapture: NSObject {
         event.getIntegerValueField(.eventSourceUserData) == InjectedEvent.tag
     }
 
+    /// CG（主屏左上原点、y 向下）→ AppKit（主屏左下原点、y 向上）。
+    ///
+    /// 抽成静态纯函数只有一个理由：这一手写坏时界面上看不出来 —— 症状是「滚轮归属
+    /// 悄悄退回前台」，日志里全是 `指针下 无`，与「指针本来就在桌面上」长得一样。
+    /// 有了这个入口，单测能用字面数字钉住它；挂在 `scrollEvent(from:)` 那一句上就只能
+    /// 间接断言，红起来也说不清是哪儿翻的。
+    ///
+    /// `primaryHeight` 必须是**全局原点所在那块屏**的高度（`NSScreen.screens.first`，
+    /// 文档保证它的左下角落在全局 (0,0)）。**不许换成 `NSScreen.main`** —— 那是含指针
+    /// 那块屏，副屏上滚轮会翻错。这一档离线给不了判据，只有装机多屏那一步能验。
+    static func appKitLocation(_ cgPoint: CGPoint, primaryHeight: Double) -> CGPoint {
+        CGPoint(x: cgPoint.x, y: primaryHeight - Double(cgPoint.y))
+    }
+
     static func scrollEvent(from event: CGEvent) -> ScrollEvent {
         let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
         let isMomentum = event.getIntegerValueField(.scrollWheelEventMomentumPhase) != 0
@@ -388,7 +413,8 @@ public class EventCapture: NSObject {
             deltaY: rawY,
             isContinuous: isContinuous,
             isMomentum: isMomentum,
-            modifiers: GestureModifier.all(in: event.flags)
+            modifiers: GestureModifier.all(in: event.flags),
+            location: appKitLocation(event.location, primaryHeight: primaryScreenHeight)
         )
     }
 
