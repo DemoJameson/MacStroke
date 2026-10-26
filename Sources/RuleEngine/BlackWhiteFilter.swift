@@ -11,55 +11,73 @@ import Foundation
 /// Thread-safe singleton for black/white list filtering.
 public final class BlackWhiteFilter: @unchecked Sendable {
 
-    /// Shared singleton instance.
+    /// Shared singleton instance backed by the app's standard defaults.
     public static let shared = BlackWhiteFilter()
 
     private let lock = NSLock()
+    private let defaults: UserDefaults
+
+    /// Creates a filter over an explicit defaults domain. Tests use an isolated
+    /// suite so they never touch the real black/white lists; the app keeps
+    /// using `shared`.
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
 
     /// Whether whitelist mode is active. When true, only whitelisted apps pass;
     /// when false, all apps pass except blacklisted ones.
     private var inWhiteListMode: Bool {
-        get { UserDefaults.standard.bool(forKey: "filterIsInWhiteMode") }
-        set { UserDefaults.standard.set(newValue, forKey: "filterIsInWhiteMode"); UserDefaults.standard.synchronize() }
+        get { defaults.bool(forKey: "filterIsInWhiteMode") }
+        set { defaults.set(newValue, forKey: "filterIsInWhiteMode"); defaults.synchronize() }
     }
 
     /// Blacklist items stored as an array of pattern strings.
     private var blackList: [String] {
-        get { UserDefaults.standard.stringArray(forKey: "filterBlackList") ?? [] }
-        set { UserDefaults.standard.set(newValue, forKey: "filterBlackList"); UserDefaults.standard.synchronize() }
+        get { defaults.stringArray(forKey: "filterBlackList") ?? [] }
+        set { defaults.set(newValue, forKey: "filterBlackList"); defaults.synchronize() }
     }
 
     /// Whitelist items stored as an array of pattern strings.
     private var whiteList: [String] {
-        get { UserDefaults.standard.stringArray(forKey: "filterWhiteList") ?? [] }
-        set { UserDefaults.standard.set(newValue, forKey: "filterWhiteList"); UserDefaults.standard.synchronize() }
+        get { defaults.stringArray(forKey: "filterWhiteList") ?? [] }
+        set { defaults.set(newValue, forKey: "filterWhiteList"); defaults.synchronize() }
     }
 
     /// Plain-text blacklist with one pattern per line (UI binding).
     public var blackListText: String {
-        get { blackList.joined(separator: "\n") }
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return blackList.joined(separator: "\n")
+        }
         set {
             lock.lock()
             defer { lock.unlock() }
-            blackList = newValue.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            UserDefaults.standard.set(blackList, forKey: "filterBlackList")
-            UserDefaults.standard.synchronize()
+            blackList = Self.patterns(from: newValue)
         }
     }
 
     /// Plain-text whitelist with one pattern per line (UI binding).
     public var whiteListText: String {
-        get { whiteList.joined(separator: "\n") }
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return whiteList.joined(separator: "\n")
+        }
         set {
             lock.lock()
             defer { lock.unlock() }
-            whiteList = newValue.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            UserDefaults.standard.set(whiteList, forKey: "filterWhiteList")
-            UserDefaults.standard.synchronize()
+            whiteList = Self.patterns(from: newValue)
         }
     }
 
-    private init() {}
+    /// One pattern per line, trimmed, blank lines dropped — the original's
+    /// `filterViewApplyClicked:` normalisation.
+    private static func patterns(from text: String) -> [String] {
+        text.split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
 
     /// Whether to hook mouse events for the given bundle ID.
     /// In whitelist mode, only whitelisted apps pass.
@@ -88,11 +106,11 @@ public final class BlackWhiteFilter: @unchecked Sendable {
 
     /// Migrate from old "blockFilter" UserDefaults key.
     public func compatibleProcedureWithPreviousVersion() {
-        if let oldBlockFilter = UserDefaults.standard.string(forKey: "blockFilter") {
+        if let oldBlockFilter = defaults.string(forKey: "blockFilter") {
             inWhiteListMode = false
             blackListText = oldBlockFilter.replacingOccurrences(of: "|", with: "\n")
-            UserDefaults.standard.removeObject(forKey: "blockFilter")
-            UserDefaults.standard.synchronize()
+            defaults.removeObject(forKey: "blockFilter")
+            defaults.synchronize()
         }
     }
 }

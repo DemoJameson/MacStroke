@@ -213,6 +213,12 @@ struct ShortcutRecorder: NSViewRepresentable {
 public struct PreferencesView: View {
     @ObservedObject var viewModel: UserPreferences
     @State private var selectedTab: PreferencesTab = .general
+    /// The filters page's unsaved text, kept by the window so switching tabs
+    /// does not silently discard what the user typed but has not applied.
+    @StateObject private var filtersDraft: FiltersDraft
+    /// The black/white list store. The app uses the shared instance; tests hand
+    /// in one over an isolated defaults domain.
+    private let filter: BlackWhiteFilter
     @StateObject private var ruleStore = RuleStore.shared
     @ObservedObject private var scriptList = AppleScriptsList.sharedAppleScriptsList
     @State private var rightClickApps: [String] = []
@@ -221,8 +227,24 @@ public struct PreferencesView: View {
     @State private var languageRevision = 0
 
     public init(viewModel: UserPreferences, initialTab: PreferencesTab = .general) {
+        let filter = BlackWhiteFilter.shared
+        self.init(viewModel: viewModel,
+                  initialTab: initialTab,
+                  filter: filter,
+                  draft: FiltersDraft(filter: filter))
+    }
+
+    /// 测试口：把存储域与草稿交进来，用例才能读到页面里未应用的编辑。走
+    /// `NSHostingView.rootView` 拿不到正在显示的那一份 —— `@StateObject`
+    /// 在 `rootView` 上是另起的副本，改它不会影响已经装进窗口的视图树。
+    init(viewModel: UserPreferences,
+         initialTab: PreferencesTab,
+         filter: BlackWhiteFilter,
+         draft: FiltersDraft) {
         self.viewModel = viewModel
+        self.filter = filter
         _selectedTab = State(initialValue: initialTab)
+        _filtersDraft = StateObject(wrappedValue: draft)
     }
 
     public var body: some View {
@@ -254,7 +276,7 @@ public struct PreferencesView: View {
                 case .rules:
                     RulesTabView(viewModel: viewModel, ruleStore: ruleStore)
                 case .filters:
-                    FiltersTabView(viewModel: viewModel)
+                    FiltersTabView(viewModel: viewModel, draft: filtersDraft, filter: filter)
                 case .appleScript:
                     AppleScriptTabView(scriptList: scriptList)
                 case .rightClick:
@@ -1184,8 +1206,18 @@ struct AppleScriptExample: Identifiable {
 
 struct FiltersTabView: View {
     @ObservedObject var viewModel: UserPreferences
-    @State private var blackListText = ""
-    @State private var whiteListText = ""
+    /// Unsaved editor text. It has to live outside the AppKit text views (they
+    /// only report edits through their delegate), so the page owns it and the
+    /// window keeps it alive across tab switches — same as the original's text
+    /// views, which never lost what had not been applied yet.
+    @ObservedObject var draft: FiltersDraft
+    let filter: BlackWhiteFilter
+
+    init(viewModel: UserPreferences, draft: FiltersDraft, filter: BlackWhiteFilter = .shared) {
+        self.viewModel = viewModel
+        self.draft = draft
+        self.filter = filter
+    }
 
     var body: some View {
         SettingsFillingPage {
@@ -1199,7 +1231,7 @@ struct FiltersTabView: View {
                         Button(L("add..")) { addRunningApps(whiteList: false) }
                         Spacer()
                     }
-                    FilterTextView(text: $blackListText, active: !viewModel.whiteListMode)
+                    FilterTextView(text: $draft.blackListText)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -1211,30 +1243,17 @@ struct FiltersTabView: View {
                         Button(L("add..")) { addRunningApps(whiteList: true) }
                         Spacer()
                     }
-                    FilterTextView(text: $whiteListText, active: viewModel.whiteListMode)
+                    FilterTextView(text: $draft.whiteListText)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
             HStack {
                 Spacer()
-                Button(L("apply rules")) { applyRules() }
+                Button(L("apply rules")) { draft.apply(to: filter) }
             }
         }
-        .onAppear {
-            blackListText = BlackWhiteFilter.shared.blackListText
-            whiteListText = BlackWhiteFilter.shared.whiteListText
-        }
-    }
-
-    /// Original `filterViewApplyClicked:`: both text views go through the
-    /// trim/drop-empty-lines setter, then the stored lists are read back so the
-    /// editor shows exactly what was persisted.
-    private func applyRules() {
-        BlackWhiteFilter.shared.blackListText = blackListText
-        BlackWhiteFilter.shared.whiteListText = whiteListText
-        blackListText = BlackWhiteFilter.shared.blackListText
-        whiteListText = BlackWhiteFilter.shared.whiteListText
+        .onAppear { draft.reloadIfClean(from: filter) }
     }
 
     /// Original `addedToTextView` picker mode: nothing is pre-checked, and OK
@@ -1243,8 +1262,62 @@ struct FiltersTabView: View {
         guard let picked = AppPickerPanel.pick(title: L("Pick a running app")),
               !picked.isEmpty else { return }
         for bundleID in picked {
-            if whiteList { whiteListText += "\n" + bundleID } else { blackListText += "\n" + bundleID }
+            if whiteList { draft.whiteListText += "\n" + bundleID } else { draft.blackListText += "\n" + bundleID }
         }
+    }
+}
+
+/// The two editors' text before "apply rules" writes it to the store.
+///
+/// The original `filterViewApplyClicked:` trimmed every line and dropped the
+/// empty ones, then read the stored lists back so the editor showed exactly
+/// what was persisted. Both halves live here so the view stays declarative and
+/// the round-trip is testable without driving SwiftUI's button.
+final class FiltersDraft: ObservableObject {
+    @Published var blackListText: String
+    @Published var whiteListText: String
+
+    /// What the store held when the draft was last loaded or applied. Used to
+    /// tell "nothing typed yet" from "edits the user has not applied" when the
+    /// page reappears.
+    private var storedBlackList: String
+    private var storedWhiteList: String
+
+    init(filter: BlackWhiteFilter = .shared) {
+        let black = filter.blackListText
+        let white = filter.whiteListText
+        blackListText = black
+        whiteListText = white
+        storedBlackList = black
+        storedWhiteList = white
+    }
+
+    /// Whether the editors hold anything that is not in the store yet.
+    var hasUnsavedEdits: Bool {
+        blackListText != storedBlackList || whiteListText != storedWhiteList
+    }
+
+    /// Re-read the stored lists (something else changed them).
+    func reload(from filter: BlackWhiteFilter) {
+        blackListText = filter.blackListText
+        whiteListText = filter.whiteListText
+        storedBlackList = blackListText
+        storedWhiteList = whiteListText
+    }
+
+    /// Page reappeared: pick up outside changes (e.g. a configuration import),
+    /// but never throw away edits the user has not applied yet — the original's
+    /// text views kept their content when the pane was switched away and back.
+    func reloadIfClean(from filter: BlackWhiteFilter) {
+        guard !hasUnsavedEdits else { return }
+        reload(from: filter)
+    }
+
+    func apply(to filter: BlackWhiteFilter) {
+        filter.blackListText = blackListText
+        filter.whiteListText = whiteListText
+        // Trim/drop-empty-lines happens in the store; show what it kept.
+        reload(from: filter)
     }
 }
 
@@ -1316,11 +1389,13 @@ struct ColorWellField: NSViewRepresentable {
 }
 
 /// Plain (non-rich) multi-line editor, 14pt system font like the original text
-/// views. The active list gets a white background, the inactive one the window
-/// background color.
+/// views. Both lists share one background (`textBackgroundColor`); which list is
+/// live is shown by the radio above, not by repainting a column.
 private struct FilterTextView: NSViewRepresentable {
     @Binding var text: String
-    let active: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = NSTextView()
@@ -1333,6 +1408,7 @@ private struct FilterTextView: NSViewRepresentable {
         textView.autoresizingMask = [.width]
         textView.isVerticallyResizable = true
         textView.textContainer?.widthTracksTextView = true
+        textView.delegate = context.coordinator
 
         let scroll = NSScrollView()
         scroll.documentView = textView
@@ -1344,12 +1420,52 @@ private struct FilterTextView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? NSTextView else { return }
+        context.coordinator.text = $text
         if textView.string != text { textView.string = text }
-        let background = active ? NSColor.white : NSColor.windowBackgroundColor
+        applyAppearance(to: scroll, textView: textView)
+    }
+
+    /// Both columns are plain text editors and look identical: the radio is what
+    /// marks the live list. Painting the active one pure white (the old code)
+    /// ignored dark mode and left a glaring slab; `textBackgroundColor` follows
+    /// the page scheme instead.
+    ///
+    /// The appearance is also pinned from the SwiftUI colour scheme. On this
+    /// machine SwiftUI already hands the representable the page's appearance
+    /// (measured: a light page keeps `Aqua` even when the window is `darkAqua`),
+    /// so the pinning is a guard rather than a fix here — it is the same
+    /// belt-and-braces the shortcut recorder needed on macOS 26/27, and it keeps
+    /// `NSColor.textBackgroundColor` resolving against the page if that changes.
+    /// The tests assert the resolved appearance, which is the part users see.
+    private func applyAppearance(to scroll: NSScrollView, textView: NSTextView) {
+        let appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
+        scroll.appearance = appearance
+        textView.appearance = appearance
+
+        let background = NSColor.textBackgroundColor
         textView.drawsBackground = true
         textView.backgroundColor = background
+        // Plain text, so one dynamic colour for the whole body: an NSTextView
+        // built before it joins the window keeps the appearance it was created
+        // under, which used to leave dark text on the forced white slab.
+        textView.textColor = NSColor.textColor
         scroll.drawsBackground = true
         scroll.backgroundColor = background
+    }
+
+    /// Writes edits back into the binding. Without this the draft stayed at its
+    /// initial value, so "apply rules" saved the empty string over the user's
+    /// lists — the bug that made the filters look like they never persisted.
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var text: Binding<String>
+
+        init(text: Binding<String>) { self.text = text }
+
+        func textDidChange(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            guard text.wrappedValue != view.string else { return }
+            text.wrappedValue = view.string
+        }
     }
 }
 
