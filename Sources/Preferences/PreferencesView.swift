@@ -347,6 +347,11 @@ struct TabButton: View {
         }
         .buttonStyle(.plain)
         .foregroundColor(isSelected ? .white : .primary)
+        // 侧栏行不要系统焦点框：打开「键盘导航」时窗口一出现就把第一行（常规）收作
+        // 焦点，系统在整行外面再描一圈蓝色 focus ring，看上去像凭空多画了一个框。
+        // 选中态本来就由上面的 accent 填充表达，这里把焦点效果摘掉；macOS 13 没有
+        // focusEffectDisabled，退回不可聚焦，同样不再画环。
+        .modifier(SidebarRowFocusStyle())
     }
 
     @ViewBuilder
@@ -359,6 +364,18 @@ struct TabButton: View {
                 .frame(width: 18, height: 18)
         } else {
             Image(systemName: tab.systemImage)
+        }
+    }
+}
+
+/// 侧栏行的焦点表现：`Button` + `.plain` 在 macOS 14 起仍会画系统 focus ring，
+/// 用 `focusEffectDisabled` 保留 Tab 可达但不描边；13 上只能退出焦点链。
+private struct SidebarRowFocusStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 14, *) {
+            content.focusEffectDisabled()
+        } else {
+            content.focusable(false)
         }
     }
 }
