@@ -103,37 +103,38 @@ final class GestureThumbView: NSView {
     }
 }
 
-/// 规则页三个文本框的样式对齐录制框（ShortcutRecorderView）：controlBackground
+/// 规则页文本框的几何：样式对齐录制框（ShortcutRecorderView）——controlBackground
 /// 圆角填充 + separator 1px 描边自绘外框；AppKit 的 text cell 一律从顶部排版
 /// （实测 20pt 框里文字中心 16 而不是 20，与 usesSingleLineMode / wraps 无关），
 /// 所以文字/编辑区域按 (框高 − 行高) / 2 下移才是真居中。
-final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
+enum CenteredTextCellLayout {
     /// 文字距左右边框的内边距（录制框同款观感）。
-    private static let horizontalPadding: CGFloat = 8
+    static let horizontalPadding: CGFloat = 8
 
     /// 文字区：左右内边距 + 垂直居中。AppKit 的 text cell 静态排版从顶部开始
     /// （实测 25pt 框里墨迹中心 16 而非 25/2），编辑态 field editor 又有自己的
     /// 2pt 容器内边距 —— 静态自绘 + editor rect 统一走这一个矩形，两种状态
     /// 的文字墨迹才落在同一位置（实测均 9~10pt / 垂直 12.5pt）。
-    private func textRect(_ rect: NSRect) -> NSRect {
+    static func textRect(_ rect: NSRect, lineHeight: CGFloat) -> NSRect {
         var r = rect
-        r.origin.y += (rect.height - cellSize.height) / 2
-        r.size.height = cellSize.height
-        r.origin.x += Self.horizontalPadding
-        r.size.width -= Self.horizontalPadding * 2
+        r.origin.y += (rect.height - lineHeight) / 2
+        r.size.height = lineHeight
+        r.origin.x += horizontalPadding
+        r.size.width -= horizontalPadding * 2
         return r
     }
 
     /// 编辑态专用：field editor 有内建的容器内边距，会让文字比静态态偏右约
     /// 1pt。这里把 editor 的矩形反向补偿，两种状态文字墨迹对齐（实测差 ≤0.5pt）。
-    private func editorRect(_ rect: NSRect) -> NSRect {
-        var r = textRect(rect)
+    static func editorRect(_ rect: NSRect, lineHeight: CGFloat) -> NSRect {
+        var r = textRect(rect, lineHeight: lineHeight)
         r.origin.x -= 0.5
         r.size.width += 1
         return r
     }
 
-    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+    /// 自绘外框：圆角 4、controlBackground 填充、separator 描边。
+    static func drawBox(in cellFrame: NSRect) {
         let box = NSBezierPath(roundedRect: cellFrame.insetBy(dx: 0.5, dy: 0.5),
                                xRadius: 4, yRadius: 4)
         NSColor.controlBackgroundColor.setFill()
@@ -141,11 +142,28 @@ final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
         NSColor.separatorColor.setStroke()
         box.lineWidth = 1
         box.stroke()
+    }
+}
+
+final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
+    private func textRect(_ rect: NSRect) -> NSRect {
+        CenteredTextCellLayout.textRect(rect, lineHeight: cellSize.height)
+    }
+
+    private func editorRect(_ rect: NSRect) -> NSRect {
+        CenteredTextCellLayout.editorRect(rect, lineHeight: cellSize.height)
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+        CenteredTextCellLayout.drawBox(in: cellFrame)
         // 文字自己画：super.drawInterior 的静态排版另有内部 inset，会和编辑态错位。
         let tr = textRect(cellFrame)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
-            .foregroundColor: NSColor.labelColor
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph
         ]
         let text = NSAttributedString(string: stringValue, attributes: attributes)
         let size = text.size()
@@ -171,6 +189,81 @@ final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
                        editor textObj: NSText, delegate: Any?, event: NSEvent?) {
         super.edit(withFrame: editorRect(rect), in: controlView, editor: textObj,
                    delegate: delegate, event: event)
+    }
+}
+
+/// Password 列必须留在 `NSSecureTextFieldCell` 这一支上：安全输入框靠它提供
+/// `NSSecureTextView` 编辑器、把静态绘制换成圆点。之前为了垂直居中把它的 cell
+/// 换成了普通 `NSTextFieldCell`，密码就按明文画了出来（实测渲染出 "hunter2"）。
+/// 这里只重写几何，文字仍交给 super 画，遮罩才不会被绕开。
+final class VerticallyCenteredSecureTextFieldCell: NSSecureTextFieldCell {
+    private func textRect(_ rect: NSRect) -> NSRect {
+        CenteredTextCellLayout.textRect(rect, lineHeight: cellSize.height)
+    }
+
+    private func editorRect(_ rect: NSRect) -> NSRect {
+        CenteredTextCellLayout.editorRect(rect, lineHeight: cellSize.height)
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+        CenteredTextCellLayout.drawBox(in: cellFrame)
+        super.drawInterior(withFrame: textRect(cellFrame), in: controlView)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect { textRect(rect) }
+    override func drawingRect(forBounds rect: NSRect) -> NSRect { textRect(rect) }
+
+    override func select(withFrame rect: NSRect, in controlView: NSView,
+                         editor textObj: NSText, delegate: Any?,
+                         start selStart: Int, length selLength: Int) {
+        super.select(withFrame: editorRect(rect), in: controlView, editor: textObj,
+                     delegate: delegate, start: selStart, length: selLength)
+    }
+
+    override func edit(withFrame rect: NSRect, in controlView: NSView,
+                       editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: editorRect(rect), in: controlView, editor: textObj,
+                   delegate: delegate, event: event)
+    }
+}
+
+/// 无外框的居中标签：截图动作在 Action 格里的说明文字。AppKit 的 label 从顶部
+/// 排版，25pt 框里文字会贴顶；这里按框中心画，和同一行的输入框对齐。
+final class VerticallyCenteredLabelCell: NSTextFieldCell {
+    override init(textCell string: String) {
+        super.init(textCell: string)
+        isEditable = false
+        isSelectable = false
+        isBordered = false
+        isBezeled = false
+        drawsBackground = false
+    }
+
+    required init(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingTail
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .foregroundColor: textColor ?? NSColor.labelColor,
+            .paragraphStyle: paragraph
+        ]
+        let text = NSAttributedString(string: stringValue, attributes: attributes)
+        let size = text.size()
+        // 左右留 6pt：文案过长时按尾部截断，不越过列边界压到隔壁格。
+        let inset: CGFloat = 6
+        text.draw(in: NSRect(x: cellFrame.minX + inset,
+                             y: cellFrame.midY - size.height / 2,
+                             width: max(0, cellFrame.width - inset * 2),
+                             height: size.height))
+    }
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        // 文字已在 draw(withFrame:) 自绘。
     }
 }
 
@@ -203,7 +296,7 @@ struct RulesTable: NSViewRepresentable {
         coordinator.onDrawGesture = onDrawGesture
 
         let table = NSTableView()
-        table.rowHeight = 84
+        table.rowHeight = Coordinator.rowHeight
         table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.allowsMultipleSelection = false
@@ -256,10 +349,13 @@ extension RulesTable {
             let specs: [(identifier: String, title: String, width: Double)] = [
                 ("Gesture_Image", L("Image"), 84),
                 ("Gesture", L("Gesture"), 98),
-                ("Type", L("Type"), 96),
+                // 114 是「Screenshot / Apple Script」在系统字号下不被系统按钮挤掉的
+                // 最小宽度（实测 112 时 "Apple Script" 还差 0.5pt 会被截断），
+                // 少出来的 18pt 从 Description 扣，总宽保持不变。
+                ("Type", L("Type"), 114),
                 ("Action", L("Action"), 104),
                 ("Filter", L("Filter"), 138.8515625),
-                ("Note", L("Description"), 221),
+                ("Note", L("Description"), 203),
             ]
             return specs.map { spec in
                 let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(spec.identifier))
@@ -340,7 +436,7 @@ extension RulesTable {
         }
 
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            84
+            Self.rowHeight
         }
 
         func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
@@ -360,7 +456,8 @@ extension RulesTable {
                 addTextCell(to: container, identifier: identifier, rule: rule, row: row,
                             columnWidth: tableColumn?.width ?? 100)
             case "Type":
-                addTypeCell(to: container, rule: rule, row: row)
+                addTypeCell(to: container, rule: rule, row: row,
+                            columnWidth: tableColumn?.width ?? 96)
             case "Action":
                 addActionCell(to: container, rule: rule, row: row)
             default:
@@ -375,7 +472,8 @@ extension RulesTable {
                 // two surfaces read as one icon. The whole stack (glyph + name)
                 // is centred vertically in the 84pt row instead of being pinned
                 // to the top with a gap underneath.
-                let rowHeight = container.bounds.height > 0 ? container.bounds.height : 84
+                let rowHeight = container.bounds.height > 0
+                    ? container.bounds.height : Self.rowHeight
                 let labelHeight: CGFloat = 16
                 let gap: CGFloat = 6
                 let glyphSide = ImpulseGlyph.intrinsicSize.height
@@ -406,7 +504,8 @@ extension RulesTable {
             guard !rule.template.points.isEmpty else {
                 // Original: an empty trajectory renders a "Draw Gesture" button
                 // instead of the canvas.
-                let button = NSButton(frame: NSRect(x: 0, y: 28, width: 80, height: 25))
+                let button = NSButton(frame: NSRect(x: 0, y: Self.controlY, width: 80,
+                                                    height: Self.controlHeight))
                 button.tag = row
                 button.bezelStyle = .texturedSquare
                 button.title = L("Draw Gesture")
@@ -440,8 +539,13 @@ extension RulesTable {
             container.addSubview(field)
         }
 
-        private func addTypeCell(to container: NSView, rule: Rule, row: Int) {
-            let combo = CallbackComboBox(frame: NSRect(x: 0, y: 25, width: 90, height: 27))
+        private func addTypeCell(to container: NSView, rule: Rule, row: Int,
+                                 columnWidth: CGFloat) {
+            // 宽度跟随列宽：写死 90 时英文 "Screenshot" 会被系统按钮挤成
+            // "Screens…"，和同一行的文本框/录制框也不齐。
+            let combo = CallbackComboBox(frame: NSRect(x: 0, y: Self.controlY,
+                                                       width: max(40, columnWidth),
+                                                       height: Self.controlHeight))
             combo.isEditable = false
             combo.completes = false
             combo.tag = row
@@ -459,7 +563,8 @@ extension RulesTable {
             switch Self.typeIndex(for: rule.action) {
             case 0:
                 let recorder = ShortcutRecorderView()
-                recorder.frame = NSRect(x: 0, y: 27, width: 100, height: 25)
+                recorder.frame = NSRect(x: 0, y: Self.controlY, width: 100,
+                                        height: Self.controlHeight)
                 // 这一格不给清除按钮：动作存的是「要按下哪个键」，(0,0) 在模型里是
                 // 「按下 A」而不是「没有」，置空等于给规则塞进一个会打字键的动作。
                 recorder.showsClearButton = false
@@ -474,7 +579,9 @@ extension RulesTable {
                 }
                 container.addSubview(recorder)
             case 1:
-                let combo = CallbackComboBox(frame: NSRect(x: 0, y: 27, width: 100, height: 25))
+                let combo = CallbackComboBox(frame: NSRect(x: 0, y: Self.controlY,
+                                                           width: 100,
+                                                           height: Self.controlHeight))
                 combo.isEditable = false
                 combo.completes = false
                 combo.usesDataSource = true
@@ -490,32 +597,46 @@ extension RulesTable {
                 container.addSubview(combo)
             case 2:
                 container.addSubview(makeField(identifier: "Text", value: textValue(of: rule),
-                                               row: row, width: 88))
+                                               row: row, width: 100))
             case 4:
                 // 截图动作没有参数可填，格子里只写清它会做什么。
                 container.addSubview(Self.makeStaticActionLabel(L("Screenshot")))
             default:
                 container.addSubview(makeField(identifier: "Password", value: passwordValue(of: rule),
-                                               row: row, width: 88))
+                                               row: row, width: 100))
             }
         }
 
         /// 无参数动作（截图）的 Action 格：一句话说明，不给可编辑框。
         private static func makeStaticActionLabel(_ text: String) -> NSTextField {
             let field = NSTextField(labelWithString: text)
-            field.frame = NSRect(x: 0, y: 30, width: 100, height: 20)
-            field.alignment = .center
+            let cell = VerticallyCenteredLabelCell(textCell: text)
+            cell.font = field.font
+            cell.textColor = .secondaryLabelColor
+            field.cell = cell
+            field.frame = NSRect(x: 0, y: controlY, width: 100, height: controlHeight)
             field.textColor = .secondaryLabelColor
             return field
         }
 
+        /// 规则行里所有输入控件的统一高度与纵向位置：25pt 高，垂直居中于 84pt 行。
+        /// Type / Action 之前分别是 27pt@25 和 25pt@27，外框与文字都比三个文本框
+        /// 低一截，这一组常量把六列钉在同一条基线上。
+        static let rowHeight: CGFloat = 84
+        static let controlHeight: CGFloat = 25
+        static let controlY: CGFloat = (rowHeight - controlHeight) / 2
+
         /// internal 供测试断言单行居中设置；调用方只有 addTextCell。
         func makeField(identifier: String, value: String, row: Int, width: CGFloat) -> NSTextField {
-            let frame = NSRect(x: 0, y: 30, width: width, height: 25)
+            let frame = NSRect(x: 0, y: Self.controlY, width: width, height: Self.controlHeight)
             let field: NSTextField = identifier == "Password"
                 ? NSSecureTextField(frame: frame)
                 : NSTextField(frame: frame)
-            let centeredCell = VerticallyCenteredTextFieldCell(textCell: value)
+            // 密码列必须用安全 cell（见 VerticallyCenteredSecureTextFieldCell），
+            // 换成普通 cell 会让密码在表格里明文显示。
+            let centeredCell: NSTextFieldCell = identifier == "Password"
+                ? VerticallyCenteredSecureTextFieldCell(textCell: value)
+                : VerticallyCenteredTextFieldCell(textCell: value)
             centeredCell.isEditable = true
             centeredCell.isBordered = false
             centeredCell.isBezeled = false
