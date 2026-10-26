@@ -22,6 +22,16 @@ final class WindowManagerTests: XCTestCase {
         XCTAssertEqual(prefs.noteRetentionTime, StorageDefaults.noteRetentionTime)
     }
 
+    /// 自动检查更新默认关（2026-10-26）。判据用 `object(forKey:)`：`bool(forKey:)`
+    /// 在键不存在时也返回 false，注册域漏写照样能过。
+    func testAutomaticUpdateChecksAreOffByDefault() {
+        let prefs = isolatedPreferences()
+        XCTAssertFalse(prefs.autoCheckUpdates, "偏好模型默认值必须是关")
+        XCTAssertFalse(StorageDefaults.autoCheckUpdates, "StorageDefaults 默认值必须是关")
+        XCTAssertNil(isolatedSuite().object(forKey: "SUEnableAutomaticChecks"),
+                     "构造偏好时不该把默认值写进用户域，否则以后改默认值压不回来")
+    }
+
     /// 同一个 suite 里 save 之后重新构造，读回的应是刚写入的值。
     func testUserPreferencesSaveAndLoad() {
         let suite = isolatedSuite()

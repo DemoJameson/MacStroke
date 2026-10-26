@@ -307,10 +307,12 @@ public enum StorageDefaults {
     public static let userTerminal: String = "Terminal"
 
     // Updates
-    // 原版默认为 true（复选框绑 SUUpdater.automaticallyChecksForUpdates，原版
-    // Info.plist 里也没有 SUEnableAutomaticChecks，即走 Sparkle 的默认开）。
-    // build_app.sh 生成的 Info.plist 同写 SUEnableAutomaticChecks=true，两处一致。
-    public static let autoCheckUpdates: Bool = true
+    // 默认关（2026-10-26 起）。原版是 true：复选框绑
+    // SUUpdater.automaticallyChecksForUpdates，原版 Info.plist 没覆盖这个键，
+    // 即走 Sparkle 的默认开。现在默认不联网检查，用户想要就去关于页手动打开
+    // 或点「立即检查」。build_app.sh 写进 Info.plist 的
+    // SUEnableAutomaticChecks 必须同步为 false，两处一致。
+    public static let autoCheckUpdates: Bool = false
 
     /// 默认开：菜单栏 App 直接抢焦点太打扰，见 StorageKey.enableUpdateReminder。
     public static let enableUpdateReminder: Bool = true

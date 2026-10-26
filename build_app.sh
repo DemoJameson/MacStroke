@@ -9,7 +9,7 @@ APP_DIR="./${APP_NAME}.app"
 # 若低于 appcast（例如写死 1.0.0），Sparkle 会把另一条代码线的 2.0.5 当成「有新版本」，
 # 用户点更新就会把本机移植构建覆盖回 ObjC 版。发新版只改这一行，主程序与扩展共用。
 # CFBundleVersion 与 MARKETING 同值，沿用原版 project.pbxproj 的做法。
-APP_VERSION="3.1.10"
+APP_VERSION="3.1.11"
 
 # 最低系统：Package.swift 的部署目标是 .macOS(.v13)，二进制 minos 就是 13.0。
 # 必须同时写进 Info.plist 和 appcast 的 sparkle:minimumSystemVersion，否则低于 13 的
@@ -171,9 +171,10 @@ find "${APP_DIR}/Contents/Frameworks" -name "Sparkle" -type f -exec install_name
 # 并弹出模态框，主线程停在 runModal 里（连 DistributedNotificationCenter 都收不到，
 # Finder 右键菜单随之失效）。私钥在 .sparkle/ed25519-private.pem（未入库）。
 # SUPublicDSAKeyFile 是沿用原版的遗留配置：Sparkle 2 已删除 DSA 支持，本包不会用到它。
-# SUEnableAutomaticChecks 要为 true：原版偏好窗的「自动检查更新」复选框直接绑
-# SUUpdater.automaticallyChecksForUpdates、Info.plist 里也没覆盖这个键（即默认为真），
-# 写 false 就等于用户不手动点「检查更新」永远收不到新版。
+# SUEnableAutomaticChecks 为 false：默认不联网检查更新（2026-10-26 起）。
+# 关于页的「自动检查更新」开关仍可打开，打开后写的是 Sparkle 自己的同名键，
+# 用户默认值优先于这里；「立即检查」不受影响。要改回默认开，同时改
+# Sources/Storage/Storage.swift 的 StorageDefaults.autoCheckUpdates。
 cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -230,7 +231,7 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
     <key>SUPublicEDKey</key>
     <string>z7QoxopiJmon580ha8Kl8tI6m+Jq+xSZ9Oz/CCVqUAU=</string>
     <key>SUEnableAutomaticChecks</key>
-    <true/>
+    <false/>
     <key>SUScheduledCheckInterval</key>
     <integer>${UPDATE_CHECK_INTERVAL}</integer>
     <key>SUScheduledImpatientCheckInterval</key>
